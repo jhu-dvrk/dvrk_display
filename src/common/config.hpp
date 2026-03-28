@@ -10,8 +10,6 @@ namespace sv {
 
 struct SourceConfig {
     std::string source;
-    int original_width = 0;
-    int original_height = 0;
 };
 
 struct AppConfig {
@@ -28,10 +26,9 @@ struct AppConfig {
     int crop_height = 0;
     int horizontal_shift_px = 0;
     int vertical_shift_px = 0;
-    std::string sink = "autovideosink sync=false";
+    std::string sink_stream = "glimagesink sync=false force-aspect-ratio=false";
     bool has_unixfd_socket_path = true;
     std::string unixfd_socket_path = "";
-    double estimated_latency = 0.0;
 };
 
 class Config {

@@ -1,6 +1,7 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -30,7 +31,7 @@
 namespace {
 
 struct CommandLineOptions {
-    std::vector<std::string> config_files;
+    std::string config_file;
 };
 
 struct CropValues {
@@ -111,14 +112,20 @@ CropValues compute_eye_crop(
 }
 
 void print_usage(const char* executable) {
-    std::cerr << "Usage: " << executable << " -c <config.json> [-c <config.json> ...]" << std::endl;
+    std::cerr << "Usage: " << executable << " -c <config.json>" << std::endl;
 }
 
 bool parse_arguments(int argc, char* argv[], CommandLineOptions& options) {
+    bool seen_config = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "-c" && i + 1 < argc) {
-            options.config_files.emplace_back(argv[++i]);
+            if (seen_config) {
+                std::cerr << "Error: multiple -c arguments are not supported; provide exactly one config file." << std::endl;
+                return false;
+            }
+            options.config_file = argv[++i];
+            seen_config = true;
             continue;
         }
 
@@ -126,8 +133,8 @@ bool parse_arguments(int argc, char* argv[], CommandLineOptions& options) {
         return false;
     }
 
-    if (options.config_files.empty()) {
-        std::cerr << "Error: at least one config file is required." << std::endl;
+    if (!seen_config) {
+        std::cerr << "Error: exactly one config file is required." << std::endl;
         return false;
     }
 
@@ -165,6 +172,62 @@ bool validate_pipeline(const std::string& stream, const rclcpp::Logger& logger, 
                  "Unable to parse GStreamer stream for '%s'; expected either a full pipeline or a source snippet",
                  name.c_str());
     return false;
+}
+
+void warn_if_interlaced_stream(const std::string& stream, const rclcpp::Logger& logger, const std::string& name) {
+    if (stream.empty()) {
+        return;
+    }
+
+    const std::string probe_pipeline =
+        stream +
+        " ! queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 leaky=downstream"
+        " ! appsink name=__caps_probe_sink__ sync=false async=false emit-signals=false drop=true max-buffers=1";
+
+    GError* error = nullptr;
+    GstElement* pipeline = gst_parse_launch(probe_pipeline.c_str(), &error);
+    if (error != nullptr || pipeline == nullptr) {
+        if (error != nullptr) {
+            RCLCPP_WARN(logger,
+                        "Unable to probe caps for '%s' stream: %s",
+                        name.c_str(),
+                        error->message != nullptr ? error->message : "unknown error");
+            g_error_free(error);
+        }
+        if (pipeline != nullptr) {
+            gst_object_unref(pipeline);
+        }
+        return;
+    }
+
+    GstElement* probe_sink = gst_bin_get_by_name(GST_BIN(pipeline), "__caps_probe_sink__");
+    if (probe_sink == nullptr) {
+        gst_object_unref(pipeline);
+        RCLCPP_WARN(logger, "Unable to probe caps for '%s' stream: missing probe sink", name.c_str());
+        return;
+    }
+
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    GstSample* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(probe_sink), 2 * GST_SECOND);
+
+    if (sample != nullptr) {
+        GstCaps* caps = gst_sample_get_caps(sample);
+        if (caps != nullptr && gst_caps_get_size(caps) > 0) {
+            const GstStructure* structure = gst_caps_get_structure(caps, 0);
+            const gchar* interlace_mode = gst_structure_get_string(structure, "interlace-mode");
+            if (interlace_mode != nullptr && std::strcmp(interlace_mode, "progressive") != 0) {
+                RCLCPP_WARN(logger,
+                            "%s stream caps report interlace-mode='%s'. Consider adding deinterlace to this stream in the config.",
+                            name.c_str(),
+                            interlace_mode);
+            }
+        }
+        gst_sample_unref(sample);
+    }
+
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(probe_sink);
+    gst_object_unref(pipeline);
 }
 
 std::string resolve_unixfd_socket_path(const sv::AppConfig& stereo) {
@@ -483,7 +546,7 @@ std::string build_pipeline_string(
         if (include_overlay) {
             output_chain += " ! cairooverlay name=stereo_overlay";
         }
-        output_chain += " ! videoconvert ! " + stereo.sink;
+        output_chain += " ! videoconvert ! " + stereo.sink_stream;
 
         if (stereo.has_unixfd_socket_path) {
             const std::string socket_path = resolve_unixfd_socket_path(stereo);
@@ -502,7 +565,7 @@ std::string build_pipeline_string(
         if (include_overlay) {
             output_chain += " ! cairooverlay name=stereo_overlay";
         }
-        output_chain += " ! videoconvert ! " + stereo.sink;
+        output_chain += " ! videoconvert ! " + stereo.sink_stream;
     }
 
     return left_chain + " " + right_chain + " " + output_chain;
@@ -531,86 +594,87 @@ int main(int argc, char* argv[]) {
         RCLCPP_WARN(node->get_logger(), "GStreamer element 'cairooverlay' is unavailable; dVRK status overlay is disabled");
     }
 
-    std::vector<sv::AppConfig> app_configs;
-    for (const auto& path : options.config_files) {
-        if (!std::filesystem::exists(path)) {
-            RCLCPP_ERROR(node->get_logger(), "Config file does not exist: %s", path.c_str());
-            rclcpp::shutdown();
-            return 1;
-        }
-
-        Json::Value root;
-        if (!sv::Config::load_from_file(path, root)) {
-            rclcpp::shutdown();
-            return 1;
-        }
-
-        if (!sv::Config::check_type(root, "dc::stereo_viewer_config@1.0.0", path)) {
-            rclcpp::shutdown();
-            return 1;
-        }
-
-        app_configs.push_back(sv::Config::parse_app_config(root));
+    const std::string& path = options.config_file;
+    if (!std::filesystem::exists(path)) {
+        RCLCPP_ERROR(node->get_logger(), "Config file does not exist: %s", path.c_str());
+        rclcpp::shutdown();
+        return 1;
     }
+
+    Json::Value root;
+    if (!sv::Config::load_from_file(path, root)) {
+        rclcpp::shutdown();
+        return 1;
+    }
+
+    if (!sv::Config::check_type(root, "sv::stereo_viewer_config@1.0.0", path)) {
+        rclcpp::shutdown();
+        return 1;
+    }
+
+    const sv::AppConfig cfg = sv::Config::parse_app_config(root);
 
     std::string pipeline_string;
     std::string selected_viewer_name = "dvrk_stereo_viewer";
     std::vector<RosImageTarget> selected_ros_targets;
-    for (const auto& cfg : app_configs) {
-        RCLCPP_INFO(node->get_logger(), "Loaded viewer config: %s", cfg.name.c_str());
-        console_name = cfg.dvrk_console_namespace;
-        overlay_state->overlay_alpha = cfg.overlay_alpha;
-        selected_viewer_name = cfg.name.empty() ? "dvrk_stereo_viewer" : cfg.name;
-        const sv::AppConfig& app_cfg = cfg;
 
-        if (!parse_ros_image_publishers(cfg.ros_image_publishers, node->get_logger(), selected_ros_targets)) {
-            rclcpp::shutdown();
-            return 1;
-        }
+    RCLCPP_INFO(node->get_logger(), "Loaded viewer config: %s", cfg.name.c_str());
+    console_name = cfg.dvrk_console_namespace;
+    overlay_state->overlay_alpha = cfg.overlay_alpha;
+    selected_viewer_name = cfg.name.empty() ? "dvrk_stereo_viewer" : cfg.name;
+    const sv::AppConfig& app_cfg = cfg;
 
-        if (!selected_ros_targets.empty()) {
-            std::string topics;
-            const std::string topic_prefix = trim_topic_tokens(selected_viewer_name);
-            for (const auto& target : selected_ros_targets) {
-                if (!topics.empty()) {
-                    topics += ", ";
-                }
-                topics += topic_prefix + "/" + ros_image_target_name(target) + "/image_raw";
-            }
-            RCLCPP_INFO(node->get_logger(), "ROS image publishing enabled for: %s", topics.c_str());
-        }
-
-        if (app_cfg.left.source.empty() || app_cfg.right.source.empty()) {
-            RCLCPP_ERROR(node->get_logger(), "Config '%s' must define left_stream and right_stream", cfg.name.c_str());
-            rclcpp::shutdown();
-            return 1;
-        }
-
-        if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
-            app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
-            RCLCPP_ERROR(node->get_logger(),
-                         "Config '%s' must provide positive original_width/original_height and crop_width/crop_height",
-                         cfg.name.c_str());
-            rclcpp::shutdown();
-            return 1;
-        }
-
-        const std::string unixfd_upload_chain = get_unixfd_upload_chain();
-        const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
-        if (app_cfg.has_unixfd_socket_path) {
-            if (app_cfg.unixfd_socket_path.empty()) {
-                RCLCPP_INFO(node->get_logger(), "unixfd publish path (default): %s", unixfd_socket_path.c_str());
-            } else {
-                RCLCPP_INFO(node->get_logger(), "unixfd publish path: %s", unixfd_socket_path.c_str());
-            }
-            RCLCPP_INFO(node->get_logger(), "unixfd export chain: %s", unixfd_upload_chain.c_str());
-        } else {
-            RCLCPP_INFO(node->get_logger(), "unixfd publish disabled (unixfd_socket_path is set to empty)");
-        }
-
-        pipeline_string = build_pipeline_string(app_cfg, selected_ros_targets, overlay_available);
-        break;
+    if (!parse_ros_image_publishers(cfg.ros_image_publishers, node->get_logger(), selected_ros_targets)) {
+        rclcpp::shutdown();
+        return 1;
     }
+
+    if (!selected_ros_targets.empty()) {
+        std::string topics;
+        const std::string topic_prefix = trim_topic_tokens(selected_viewer_name);
+        for (const auto& target : selected_ros_targets) {
+            if (!topics.empty()) {
+                topics += ", ";
+            }
+            topics += topic_prefix + "/" + ros_image_target_name(target) + "/image_raw";
+        }
+        RCLCPP_INFO(node->get_logger(), "ROS image publishing enabled for: %s", topics.c_str());
+    }
+
+    if (app_cfg.left.source.empty() || app_cfg.right.source.empty()) {
+        RCLCPP_ERROR(node->get_logger(), "Config '%s' must define left_stream and right_stream", cfg.name.c_str());
+        rclcpp::shutdown();
+        return 1;
+    }
+
+    warn_if_interlaced_stream(app_cfg.left.source, node->get_logger(), "left");
+    warn_if_interlaced_stream(app_cfg.right.source, node->get_logger(), "right");
+
+    if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
+        app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
+        RCLCPP_ERROR(node->get_logger(),
+                     "Config '%s' must provide positive original_width/original_height and crop_width/crop_height",
+                     cfg.name.c_str());
+        rclcpp::shutdown();
+        return 1;
+    }
+
+    const std::string unixfd_upload_chain = get_unixfd_upload_chain();
+    const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
+    if (app_cfg.has_unixfd_socket_path) {
+        if (app_cfg.unixfd_socket_path.empty()) {
+            RCLCPP_INFO(node->get_logger(), "unixfd publish path (default): %s", unixfd_socket_path.c_str());
+        } else {
+            RCLCPP_INFO(node->get_logger(), "unixfd publish path: %s", unixfd_socket_path.c_str());
+        }
+        RCLCPP_INFO(node->get_logger(), "unixfd export chain: %s", unixfd_upload_chain.c_str());
+    } else {
+        RCLCPP_INFO(node->get_logger(), "unixfd publish disabled (unixfd_socket_path is set to empty)");
+    }
+
+    RCLCPP_INFO(node->get_logger(), "Sink stream: %s", app_cfg.sink_stream.c_str());
+
+    pipeline_string = build_pipeline_string(app_cfg, selected_ros_targets, overlay_available);
 
     std::vector<std::unique_ptr<RosImagePublisherContext>> ros_publisher_contexts;
     std::shared_ptr<image_transport::ImageTransport> ros_image_transport;
@@ -639,6 +703,8 @@ int main(int argc, char* argv[]) {
                 teleop_unselected_topic.c_str());
 
     const auto latch_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    const auto measured_cp_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
+    const auto persistent_event_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
     const auto teleop_selected_qos = rclcpp::QoS(rclcpp::KeepLast(5)).reliable().transient_local();
     auto camera_sub = node->create_subscription<sensor_msgs::msg::Joy>(
         camera_topic,
@@ -657,12 +723,14 @@ int main(int argc, char* argv[]) {
     );
 
     auto following_subscribers_cache = std::make_shared<std::unordered_map<std::string, rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr>>();
+    auto measured_cp_subscribers_cache = std::make_shared<std::unordered_map<std::string, rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr>>();
+    auto tool_type_subscribers_cache = std::make_shared<std::unordered_map<std::string, rclcpp::Subscription<std_msgs::msg::String>::SharedPtr>>();
     auto active_teleops = std::make_shared<std::unordered_set<std::string>>();
     auto latest_teleop_by_mtm = std::make_shared<std::unordered_map<std::string, std::string>>();
     auto teleop_selected_sub = node->create_subscription<std_msgs::msg::String>(
         teleop_selected_topic,
         teleop_selected_qos,
-        [node, overlay_state, following_subscribers_cache, active_teleops, latest_teleop_by_mtm, latch_qos](const std_msgs::msg::String::SharedPtr msg) {
+        [node, overlay_state, following_subscribers_cache, measured_cp_subscribers_cache, tool_type_subscribers_cache, active_teleops, latest_teleop_by_mtm, latch_qos, measured_cp_qos, persistent_event_qos](const std_msgs::msg::String::SharedPtr msg) {
             if (msg == nullptr) {
                 return;
             }
@@ -670,7 +738,9 @@ int main(int argc, char* argv[]) {
             std::string mtm_name;
             sv::TeleopSide side;
             int psm_number = 0;
-            if (!sv::parse_teleop_name(msg->data, mtm_name, side, psm_number)) {
+            std::string arm_name;
+            bool is_camera_teleop = false;
+            if (!sv::parse_teleop_name(msg->data, mtm_name, side, psm_number, &arm_name, &is_camera_teleop)) {
                 return;
             }
 
@@ -693,24 +763,54 @@ int main(int argc, char* argv[]) {
 
             sv::on_teleop_selected(msg, overlay_state);
 
-            if (following_subscribers_cache->find(teleop_name) != following_subscribers_cache->end()) {
-                return;
-            }
-            const std::string following_topic = "/" + teleop_name + "/following";
+            if (following_subscribers_cache->find(teleop_name) == following_subscribers_cache->end()) {
+                const std::string following_topic = "/" + teleop_name + "/following";
 
-            auto following_sub = node->create_subscription<std_msgs::msg::Bool>(
-                following_topic,
-                latch_qos,
-                [overlay_state, active_teleops, teleop_name](const std_msgs::msg::Bool::SharedPtr following_msg) {
-                    if (active_teleops->find(teleop_name) == active_teleops->end()) {
-                        return;
+                auto following_sub = node->create_subscription<std_msgs::msg::Bool>(
+                    following_topic,
+                    latch_qos,
+                    [overlay_state, active_teleops, teleop_name](const std_msgs::msg::Bool::SharedPtr following_msg) {
+                        if (active_teleops->find(teleop_name) == active_teleops->end()) {
+                            return;
+                        }
+                        sv::on_teleop_following(teleop_name, following_msg, overlay_state);
                     }
-                    sv::on_teleop_following(teleop_name, following_msg, overlay_state);
-                }
-            );
+                );
 
-            (*following_subscribers_cache)[teleop_name] = following_sub;
-            RCLCPP_INFO(node->get_logger(), "Cached teleop following subscriber: %s", following_topic.c_str());
+                (*following_subscribers_cache)[teleop_name] = following_sub;
+                RCLCPP_INFO(node->get_logger(), "Cached teleop following subscriber: %s", following_topic.c_str());
+            }
+
+            if (!arm_name.empty() && measured_cp_subscribers_cache->find(arm_name) == measured_cp_subscribers_cache->end()) {
+                const std::string measured_cp_topic = "/" + arm_name + "/measured_cp";
+                auto measured_cp_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(
+                    measured_cp_topic,
+                    measured_cp_qos,
+                    [overlay_state, arm_name](const geometry_msgs::msg::PoseStamped::SharedPtr measured_cp_msg) {
+                        sv::on_teleop_measured_cp(arm_name, measured_cp_msg, overlay_state);
+                    }
+                );
+
+                (*measured_cp_subscribers_cache)[arm_name] = measured_cp_sub;
+                RCLCPP_INFO(node->get_logger(), "Cached arm measured_cp subscriber: %s", measured_cp_topic.c_str());
+            }
+
+            if (!is_camera_teleop && psm_number > 0) {
+                const std::string psm_name = "PSM" + std::to_string(psm_number);
+                if (tool_type_subscribers_cache->find(psm_name) == tool_type_subscribers_cache->end()) {
+                    const std::string tool_type_topic = "/" + psm_name + "/tool_type";
+                    auto tool_type_sub = node->create_subscription<std_msgs::msg::String>(
+                        tool_type_topic,
+                        persistent_event_qos,
+                        [overlay_state, psm_name](const std_msgs::msg::String::SharedPtr tool_type_msg) {
+                            sv::on_teleop_tool_type(psm_name, tool_type_msg, overlay_state);
+                        }
+                    );
+
+                    (*tool_type_subscribers_cache)[psm_name] = tool_type_sub;
+                    RCLCPP_INFO(node->get_logger(), "Cached PSM tool_type subscriber: %s", tool_type_topic.c_str());
+                }
+            }
         }
     );
 

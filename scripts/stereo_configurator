@@ -145,7 +145,7 @@ def open_capture(source_label: str, source_snippet: str):
 
 
 def ensure_config_fields(config):
-    config.setdefault("type", "dc::stereo_viewer_config@1.0.0")
+    config.setdefault("type", "sv::stereo_viewer_config@1.0.0")
     config.setdefault("name", "dvrk_stereo_viewer")
     config.setdefault("dvrk_console_namespace", "console")
     config.setdefault("original_width", 0)
@@ -156,7 +156,7 @@ def ensure_config_fields(config):
     config.setdefault("vertical_shift_px", 0)
     config.setdefault("left_stream", "")
     config.setdefault("right_stream", "")
-    config.setdefault("sink", "autovideosink sync=false")
+    config.setdefault("sink", "glimage")
     return config
 
 
@@ -166,7 +166,7 @@ def load_or_create(path: Path):
             return json.load(stream)
 
     return {
-        "type": "dc::stereo_viewer_config@1.0.0",
+        "type": "sv::stereo_viewer_config@1.0.0",
         "name": "dvrk_stereo_viewer",
         "dvrk_console_namespace": "console",
         "original_width": 0,
@@ -177,7 +177,7 @@ def load_or_create(path: Path):
         "vertical_shift_px": 0,
         "left_stream": "",
         "right_stream": "",
-        "sink": "autovideosink sync=false",
+        "sink": "glimage",
     }
 
 
@@ -202,7 +202,7 @@ def apply_stream_overrides(config, args):
 
 
 def update_config_from_runtime(config, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift):
-    config["type"] = "dc::stereo_viewer_config@1.0.0"
+    config["type"] = "sv::stereo_viewer_config@1.0.0"
     config.setdefault("name", "dvrk_stereo_viewer")
 
     config["left_stream"] = left_stream

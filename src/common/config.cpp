@@ -76,17 +76,19 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     if (root.isMember("vertical_shift_px")) {
         cfg.vertical_shift_px = root["vertical_shift_px"].asInt();
     }
-    if (root.isMember("sink")) {
-        cfg.sink = root["sink"].asString();
+    {
+        const std::string sink_type = root.get("sink", "glimage").asString();
+        if (sink_type == "custom") {
+            cfg.sink_stream = root.get("sink_stream", "").asString();
+        } else {
+            // default: "glimage"
+            cfg.sink_stream = "glimagesink sync=false force-aspect-ratio=false";
+        }
     }
     if (root.isMember("unixfd_socket_path")) {
         cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();
         cfg.has_unixfd_socket_path = !cfg.unixfd_socket_path.empty();
     }
-    if (root.isMember("estimated_latency")) {
-        cfg.estimated_latency = root["estimated_latency"].asDouble();
-    }
-
     if (root.isMember("left_stream")) {
         cfg.left.source = root["left_stream"].asString();
     }
@@ -94,20 +96,6 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.right.source = root["right_stream"].asString();
     }
 
-    if (cfg.original_width <= 0) {
-        if (cfg.left.original_width > 0 && cfg.right.original_width > 0) {
-            cfg.original_width = std::min(cfg.left.original_width, cfg.right.original_width);
-        } else {
-            cfg.original_width = std::max(cfg.left.original_width, cfg.right.original_width);
-        }
-    }
-    if (cfg.original_height <= 0) {
-        if (cfg.left.original_height > 0 && cfg.right.original_height > 0) {
-            cfg.original_height = std::min(cfg.left.original_height, cfg.right.original_height);
-        } else {
-            cfg.original_height = std::max(cfg.left.original_height, cfg.right.original_height);
-        }
-    }
     if (cfg.crop_width <= 0) {
         cfg.crop_width = cfg.original_width;
     }
