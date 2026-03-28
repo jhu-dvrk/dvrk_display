@@ -12,6 +12,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(image_transport REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
 
@@ -39,10 +41,13 @@ ament_target_dependencies(dvrk_stereo_viewer_lib
 
 add_executable(dvrk_stereo_viewer
   src/dvrk_stereo_viewer/main.cpp
+  src/dvrk_stereo_viewer/overlay.cpp
 )
 ament_target_dependencies(dvrk_stereo_viewer
   rclcpp
   sensor_msgs
+  std_msgs
+  image_transport
 )
 target_include_directories(dvrk_stereo_viewer PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common

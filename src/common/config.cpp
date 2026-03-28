@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
-#include <map>
 
 namespace sv {
 
@@ -31,96 +30,61 @@ bool Config::check_type(const Json::Value& root, const std::string& expected_typ
     }
 
     const std::string actual_type = root["type"].asString();
-    if (actual_type == expected_type) {
-        return true;
+    if (actual_type != expected_type) {
+        std::cerr << "Error: Incompatible JSON type in '" << path << "'. "
+                  << "Found \"" << actual_type << "\", but expected \"" << expected_type << "\"."
+                  << std::endl;
+        return false;
     }
-
-    static const std::map<std::string, std::string> type_map = {
-        {"stereo_viewer_config_v1", "sv::config@1.0.0"}
-    };
-
-    const auto it = type_map.find(expected_type);
-    if (it != type_map.end() && actual_type == it->second) {
-        return true;
-    }
-
-    std::cerr << "Error: Incompatible JSON type in '" << path << "'. "
-              << "Found \"" << actual_type << "\", but expected \"" << expected_type << "\"."
-              << std::endl;
-    return false;
+    return true;
 }
 
-StereoConfig Config::parse_stereo_config(const Json::Value& root) {
-    StereoConfig cfg;
-
-    const Json::Value& stereo = root.isMember("stereo") ? root["stereo"] : root;
-    if (stereo.isMember("name")) {
-        cfg.name = stereo["name"].asString();
-    }
+AppConfig Config::parse_app_config(const Json::Value& root) {
+    AppConfig cfg;
+    cfg.name = root.get("name", "dvrk_stereo_viewer").asString();
     if (cfg.name.empty()) {
-        cfg.name = "stereo_preview";
+        cfg.name = "dvrk_stereo_viewer";
     }
-    if (stereo.isMember("original_width")) {
-        cfg.original_width = stereo["original_width"].asInt();
+    cfg.dvrk_console_namespace = root.get("dvrk_console_namespace", "console").asString();
+    if (cfg.dvrk_console_namespace.empty()) {
+        cfg.dvrk_console_namespace = "console";
     }
-    if (stereo.isMember("original_height")) {
-        cfg.original_height = stereo["original_height"].asInt();
+    if (root.isMember("ros_image_publishers") && root["ros_image_publishers"].isArray()) {
+        for (const auto& item : root["ros_image_publishers"]) {
+            if (item.isString()) {
+                cfg.ros_image_publishers.push_back(item.asString());
+            }
+        }
     }
-    if (stereo.isMember("crop_width")) {
-        cfg.crop_width = stereo["crop_width"].asInt();
+    cfg.overlay_alpha = root.get("overlay_alpha", 0.7).asDouble();
+
+    if (root.isMember("original_width")) {
+        cfg.original_width = root["original_width"].asInt();
     }
-    if (stereo.isMember("crop_height")) {
-        cfg.crop_height = stereo["crop_height"].asInt();
+    if (root.isMember("original_height")) {
+        cfg.original_height = root["original_height"].asInt();
     }
-    if (stereo.isMember("horizontal_shift_px")) {
-        cfg.horizontal_shift_px = stereo["horizontal_shift_px"].asInt();
+    if (root.isMember("crop_width")) {
+        cfg.crop_width = root["crop_width"].asInt();
     }
-    if (stereo.isMember("vertical_shift_px")) {
-        cfg.vertical_shift_px = stereo["vertical_shift_px"].asInt();
+    if (root.isMember("crop_height")) {
+        cfg.crop_height = root["crop_height"].asInt();
     }
-    if (stereo.isMember("sink")) {
-        cfg.sink = stereo["sink"].asString();
+    if (root.isMember("horizontal_shift_px")) {
+        cfg.horizontal_shift_px = root["horizontal_shift_px"].asInt();
     }
-    if (stereo.isMember("unixfd_socket_path")) {
-        cfg.unixfd_socket_path = stereo["unixfd_socket_path"].asString();
+    if (root.isMember("vertical_shift_px")) {
+        cfg.vertical_shift_px = root["vertical_shift_px"].asInt();
+    }
+    if (root.isMember("sink")) {
+        cfg.sink = root["sink"].asString();
+    }
+    if (root.isMember("unixfd_socket_path")) {
+        cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();
         cfg.has_unixfd_socket_path = !cfg.unixfd_socket_path.empty();
     }
-    if (stereo.isMember("estimated_latency")) {
-        cfg.estimated_latency = stereo["estimated_latency"].asDouble();
-    }
-
-    if (stereo.isMember("left") && stereo["left"].isObject()) {
-        const auto& left = stereo["left"];
-        if (left.isMember("source")) {
-            cfg.left.source = left["source"].asString();
-        }
-        if (left.isMember("original_width")) {
-            cfg.left.original_width = left["original_width"].asInt();
-        }
-        if (left.isMember("original_height")) {
-            cfg.left.original_height = left["original_height"].asInt();
-        }
-    }
-
-    if (stereo.isMember("left_stream")) {
-        cfg.left.source = stereo["left_stream"].asString();
-    }
-
-    if (stereo.isMember("right") && stereo["right"].isObject()) {
-        const auto& right = stereo["right"];
-        if (right.isMember("source")) {
-            cfg.right.source = right["source"].asString();
-        }
-        if (right.isMember("original_width")) {
-            cfg.right.original_width = right["original_width"].asInt();
-        }
-        if (right.isMember("original_height")) {
-            cfg.right.original_height = right["original_height"].asInt();
-        }
-    }
-
-    if (stereo.isMember("right_stream")) {
-        cfg.right.source = stereo["right_stream"].asString();
+    if (root.isMember("estimated_latency")) {
+        cfg.estimated_latency = root["estimated_latency"].asDouble();
     }
 
     if (root.isMember("left_stream")) {
@@ -150,18 +114,6 @@ StereoConfig Config::parse_stereo_config(const Json::Value& root) {
     if (cfg.crop_height <= 0) {
         cfg.crop_height = cfg.original_height;
     }
-
-    return cfg;
-}
-
-AppConfig Config::parse_app_config(const Json::Value& root) {
-    AppConfig cfg;
-    cfg.viewer_name = root.get("viewer_name", "dvrk_stereo_viewer").asString();
-    cfg.console = root.get("console", "console").asString();
-    if (cfg.console.empty()) {
-        cfg.console = "console";
-    }
-    cfg.stereo = parse_stereo_config(root);
 
     return cfg;
 }

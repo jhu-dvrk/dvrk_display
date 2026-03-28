@@ -144,31 +144,20 @@ def open_capture(source_label: str, source_snippet: str):
     return cap
 
 
-def ensure_stereo(config):
-    if "stereo" not in config or not isinstance(config["stereo"], dict):
-        config["stereo"] = {}
-    stereo = config["stereo"]
-
-    if "left_stream" not in stereo and "left" in stereo and isinstance(stereo["left"], dict):
-        stereo["left_stream"] = stereo["left"].get("source", "")
-    if "right_stream" not in stereo and "right" in stereo and isinstance(stereo["right"], dict):
-        stereo["right_stream"] = stereo["right"].get("source", "")
-    if "left_stream" not in stereo and "left_stream" in config:
-        stereo["left_stream"] = config["left_stream"]
-    if "right_stream" not in stereo and "right_stream" in config:
-        stereo["right_stream"] = config["right_stream"]
-
-    stereo.setdefault("name", "stereo_preview")
-    stereo.setdefault("original_width", 0)
-    stereo.setdefault("original_height", 0)
-    stereo.setdefault("crop_width", 0)
-    stereo.setdefault("crop_height", 0)
-    stereo.setdefault("horizontal_shift_px", 0)
-    stereo.setdefault("vertical_shift_px", 0)
-    stereo.setdefault("left_stream", "")
-    stereo.setdefault("right_stream", "")
-    stereo.setdefault("sink", "autovideosink sync=false")
-    return stereo
+def ensure_config_fields(config):
+    config.setdefault("type", "dc::stereo_viewer_config@1.0.0")
+    config.setdefault("name", "dvrk_stereo_viewer")
+    config.setdefault("dvrk_console_namespace", "console")
+    config.setdefault("original_width", 0)
+    config.setdefault("original_height", 0)
+    config.setdefault("crop_width", 0)
+    config.setdefault("crop_height", 0)
+    config.setdefault("horizontal_shift_px", 0)
+    config.setdefault("vertical_shift_px", 0)
+    config.setdefault("left_stream", "")
+    config.setdefault("right_stream", "")
+    config.setdefault("sink", "autovideosink sync=false")
+    return config
 
 
 def load_or_create(path: Path):
@@ -177,20 +166,19 @@ def load_or_create(path: Path):
             return json.load(stream)
 
     return {
-        "type": "stereo_viewer_config_v1",
-        "viewer_name": "dvrk_stereo_viewer",
-        "stereo": {
-            "name": "stereo_preview",
-            "original_width": 0,
-            "original_height": 0,
-            "crop_width": 0,
-            "crop_height": 0,
-            "horizontal_shift_px": 0,
-            "vertical_shift_px": 0,
-            "left_stream": "",
-            "right_stream": "",
-            "sink": "autovideosink sync=false",
-        },\n    }
+        "type": "dc::stereo_viewer_config@1.0.0",
+        "name": "dvrk_stereo_viewer",
+        "dvrk_console_namespace": "console",
+        "original_width": 0,
+        "original_height": 0,
+        "crop_width": 0,
+        "crop_height": 0,
+        "horizontal_shift_px": 0,
+        "vertical_shift_px": 0,
+        "left_stream": "",
+        "right_stream": "",
+        "sink": "autovideosink sync=false",
+    }
 
 
 def parse_args():
@@ -206,32 +194,32 @@ def parse_args():
     return parser.parse_args()
 
 
-def apply_stream_overrides(stereo, args):
+def apply_stream_overrides(config, args):
     if args.left is not None:
-        stereo["left_stream"] = args.left
+        config["left_stream"] = args.left
     if args.right is not None:
-        stereo["right_stream"] = args.right
+        config["right_stream"] = args.right
 
 
-def update_config_from_runtime(config, stereo, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift):
-    config["type"] = "stereo_viewer_config_v1"
-    config.setdefault("viewer_name", "dvrk_stereo_viewer")
+def update_config_from_runtime(config, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift):
+    config["type"] = "dc::stereo_viewer_config@1.0.0"
+    config.setdefault("name", "dvrk_stereo_viewer")
 
-    stereo["left_stream"] = left_stream
-    stereo["right_stream"] = right_stream
-    stereo["original_width"] = int(original_w)
-    stereo["original_height"] = int(original_h)
-    stereo["crop_width"] = int(crop_w)
-    stereo["crop_height"] = int(crop_h)
-    stereo["horizontal_shift_px"] = int(horizontal_shift)
-    stereo["vertical_shift_px"] = int(vertical_shift)
+    config["left_stream"] = left_stream
+    config["right_stream"] = right_stream
+    config["original_width"] = int(original_w)
+    config["original_height"] = int(original_h)
+    config["crop_width"] = int(crop_w)
+    config["crop_height"] = int(crop_h)
+    config["horizontal_shift_px"] = int(horizontal_shift)
+    config["vertical_shift_px"] = int(vertical_shift)
 
 
-def interactive_tune(stereo):
-    left_stream = stereo.get("left_stream", "").strip()
-    right_stream = stereo.get("right_stream", "").strip()
+def interactive_tune(config):
+    left_stream = config.get("left_stream", "").strip()
+    right_stream = config.get("right_stream", "").strip()
     if not left_stream or not right_stream:
-        raise RuntimeError("Both stereo.left_stream and stereo.right_stream are required")
+        raise RuntimeError("Both left_stream and right_stream are required")
 
     left_cap = open_capture("left", left_stream)
     right_cap = open_capture("right", right_stream)
@@ -246,14 +234,14 @@ def interactive_tune(stereo):
 
     detected_w = min(left_w, right_w)
     detected_h = min(left_h, right_h)
-    original_w = int(stereo.get("original_width", 0)) or detected_w
-    original_h = int(stereo.get("original_height", 0)) or detected_h
+    original_w = int(config.get("original_width", 0)) or detected_w
+    original_h = int(config.get("original_height", 0)) or detected_h
 
     original_w = min(original_w, detected_w)
     original_h = min(original_h, detected_h)
 
-    configured_crop_w = int(stereo.get("crop_width", 0))
-    configured_crop_h = int(stereo.get("crop_height", 0))
+    configured_crop_w = int(config.get("crop_width", 0))
+    configured_crop_h = int(config.get("crop_height", 0))
     if configured_crop_w > 0:
         resize_percent = compute_resize_percent_from_crop(original_w, configured_crop_w)
     elif configured_crop_h > 0:
@@ -262,8 +250,8 @@ def interactive_tune(stereo):
         resize_percent = 100
     crop_w, crop_h = compute_crop_size_from_percent(original_w, original_h, resize_percent)
 
-    horizontal_shift = int(stereo.get("horizontal_shift_px", 0))
-    vertical_shift = int(stereo.get("vertical_shift_px", 0))
+    horizontal_shift = int(config.get("horizontal_shift_px", 0))
+    vertical_shift = int(config.get("vertical_shift_px", 0))
     horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
     vertical_shift = clamp_offset_to_valid(original_h, crop_h, vertical_shift)
 
@@ -402,18 +390,17 @@ def main():
 
     config = load_or_create(path)
 
-    stereo = ensure_stereo(config)
-    apply_stream_overrides(stereo, args)
+    ensure_config_fields(config)
+    apply_stream_overrides(config, args)
 
     try:
-        runtime_values = interactive_tune(stereo)
+        runtime_values = interactive_tune(config)
     except RuntimeError as exc:
         print(f"Error: {exc}")
         return 1
 
     update_config_from_runtime(
         config,
-        stereo,
         runtime_values["left_stream"],
         runtime_values["right_stream"],
         runtime_values["original_width"],
@@ -445,7 +432,7 @@ def main():
         stream.write(rendered + "\n")
 
     print(f"Wrote {path}")
-    print("Saved fields: stereo.left_stream, stereo.right_stream, stereo.original_*, stereo.crop_*, stereo.*_shift_px")
+    print("Saved fields: left_stream, right_stream, original_*, crop_*, *_shift_px")
     return 0
 
 
