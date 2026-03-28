@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dvrk_stereo_viewer</name>
+  <version>0.0.0</version>
+  <description>Shell package for a ROS 2 stereo viewer using C++, GStreamer, and JSON configuration</description>
+  <maintainer email="anton.deguet@jhu.edu">Anton Deguet</maintainer>
+  <license>MIT</license>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>ament_index_cpp</depend>
+
+  <build_depend>ament_cmake</build_depend>
+  <build_depend>pkg-config</build_depend>
+  <build_depend>gstreamer-1.0</build_depend>
+  <build_depend>gstreamer-video-1.0</build_depend>
+  <build_depend>gstreamer-app-1.0</build_depend>
+  <build_depend>libjsoncpp-dev</build_depend>
+  <build_depend>libcairo2-dev</build_depend>
+
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>gstreamer-1.0</exec_depend>
+  <exec_depend>gstreamer-video-1.0</exec_depend>
+  <exec_depend>gstreamer-app-1.0</exec_depend>
+  <exec_depend>libjsoncpp-dev</exec_depend>
+  <exec_depend>libcairo2</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
