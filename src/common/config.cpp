@@ -41,6 +41,23 @@ bool Config::check_type(const Json::Value& root, const std::string& expected_typ
 
 AppConfig Config::parse_app_config(const Json::Value& root) {
     AppConfig cfg;
+
+    auto parse_color = [](const Json::Value& node) {
+        ColorAdjustment color;
+        if (node.isMember("brightness")) color.brightness = node["brightness"].asDouble();
+        if (node.isMember("contrast")) color.contrast = node["contrast"].asDouble();
+        if (node.isMember("saturation")) color.saturation = node["saturation"].asDouble();
+        if (node.isMember("hue")) color.hue = node["hue"].asDouble();
+        return color;
+    };
+
+    if (root.isMember("left_color")) {
+        cfg.left_color = parse_color(root["left_color"]);
+    }
+    if (root.isMember("right_color")) {
+        cfg.right_color = parse_color(root["right_color"]);
+    }
+
     cfg.name = root.get("name", "dvrk_stereo_viewer").asString();
     if (cfg.name.empty()) {
         cfg.name = "dvrk_stereo_viewer";
@@ -76,6 +93,7 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     if (root.isMember("vertical_shift_px")) {
         cfg.vertical_shift_px = root["vertical_shift_px"].asInt();
     }
+    cfg.preserve_size = root.get("preserve_size", true).asBool();
     if (root.isMember("sinks") && root["sinks"].isArray()) {
         for (const auto& item : root["sinks"]) {
             if (!item.isString()) {

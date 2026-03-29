@@ -12,6 +12,13 @@ struct SourceConfig {
     std::string source;
 };
 
+struct ColorAdjustment {
+    double brightness = 0.0;
+    double contrast = 1.0;
+    double saturation = 1.0;
+    double hue = 0.0;
+};
+
 struct AppConfig {
     std::string name = "dvrk_stereo_viewer";
     std::string dvrk_console_namespace = "console";
@@ -20,12 +27,15 @@ struct AppConfig {
 
     SourceConfig left;
     SourceConfig right;
+    ColorAdjustment left_color;
+    ColorAdjustment right_color;
     int original_width = 0;
     int original_height = 0;
     int crop_width = 0;
     int crop_height = 0;
     int horizontal_shift_px = 0;
     int vertical_shift_px = 0;
+    bool preserve_size = true;
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;
     bool has_unixfd_socket_path = true;

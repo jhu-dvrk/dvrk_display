@@ -257,11 +257,7 @@ bool check_element_available(const std::string& element_name) {
 }
 
 std::string get_unixfd_upload_chain() {
-    if (check_element_available("nvvidconv")) {
-        return "videoconvert ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12";
-    }
-
-    return "videoconvert ! video/x-raw,format=I420";
+    return "gldownload ! videoconvert ! video/x-raw,format=I420";
 }
 
 std::string to_lower(std::string value) {
@@ -461,13 +457,42 @@ gboolean on_bus_message(GstBus*, GstMessage* msg, gpointer) {
     return G_SOURCE_CONTINUE;
 }
 
+std::string color_adjustment_string(const sv::ColorAdjustment& color) {
+    if (color.brightness == 0.0 && color.contrast == 1.0 && color.saturation == 1.0 && color.hue == 0.0) {
+        return "";
+    }
+    return " ! videobalance brightness=" + std::to_string(color.brightness) +
+           " contrast=" + std::to_string(color.contrast) +
+           " saturation=" + std::to_string(color.saturation) +
+           " hue=" + std::to_string(color.hue);
+}
+
 std::string build_pipeline_string(
     const sv::AppConfig& stereo,
     const std::vector<RosImageTarget>& ros_targets,
     const bool include_overlay
 ) {
-    const int eye_w = stereo.crop_width;
-    const int eye_h = stereo.crop_height;
+    int base_crop_w = stereo.crop_width > 0 ? stereo.crop_width : stereo.original_width;
+    int base_crop_h = stereo.crop_height > 0 ? stereo.crop_height : stereo.original_height;
+
+    int aspect_crop_l = 0, aspect_crop_r = 0, aspect_crop_t = 0, aspect_crop_b = 0;
+
+    if (stereo.preserve_size && stereo.original_width > 0 && stereo.original_height > 0) {
+        double orig_aspect = static_cast<double>(stereo.original_width) / static_cast<double>(stereo.original_height);
+        int w_c_prime = std::min(base_crop_w, static_cast<int>(std::round(base_crop_h * orig_aspect)));
+        int h_c_prime = std::min(base_crop_h, static_cast<int>(std::round(base_crop_w / orig_aspect)));
+
+        int diff_x = base_crop_w - w_c_prime;
+        int diff_y = base_crop_h - h_c_prime;
+
+        aspect_crop_l = diff_x / 2;
+        aspect_crop_r = diff_x - aspect_crop_l;
+        aspect_crop_t = diff_y / 2;
+        aspect_crop_b = diff_y - aspect_crop_t;
+    }
+
+    const int eye_w = stereo.preserve_size ? stereo.original_width : base_crop_w;
+    const int eye_h = stereo.preserve_size ? stereo.original_height : base_crop_h;
 
     const bool publish_left = has_ros_target(ros_targets, RosImageTarget::Left);
     const bool publish_right = has_ros_target(ros_targets, RosImageTarget::Right);
@@ -475,41 +500,59 @@ std::string build_pipeline_string(
     const bool has_glimage = std::find(stereo.sinks.begin(), stereo.sinks.end(), "glimage") != stereo.sinks.end();
     const bool has_glimages = std::find(stereo.sinks.begin(), stereo.sinks.end(), "glimages") != stereo.sinks.end();
 
-    int horizontal_shift_px = clamp_offset_to_valid(stereo.original_width, eye_w, stereo.horizontal_shift_px);
-    int vertical_shift_px = clamp_offset_to_valid(stereo.original_height, eye_h, stereo.vertical_shift_px);
+    int horizontal_shift_px = clamp_offset_to_valid(stereo.original_width, base_crop_w, stereo.horizontal_shift_px);
+    int vertical_shift_px = clamp_offset_to_valid(stereo.original_height, base_crop_h, stereo.vertical_shift_px);
 
-    const CropValues left_crop = compute_eye_crop(
+    CropValues left_crop = compute_eye_crop(
         stereo.original_width,
         stereo.original_height,
-        eye_w,
-        eye_h,
+        base_crop_w,
+        base_crop_h,
         horizontal_shift_px,
         vertical_shift_px,
         -1
     );
 
-    const CropValues right_crop = compute_eye_crop(
+    CropValues right_crop = compute_eye_crop(
         stereo.original_width,
         stereo.original_height,
-        eye_w,
-        eye_h,
+        base_crop_w,
+        base_crop_h,
         horizontal_shift_px,
         vertical_shift_px,
         1
     );
 
+    if (stereo.preserve_size) {
+        left_crop.left += aspect_crop_l;
+        left_crop.right += aspect_crop_r;
+        left_crop.top += aspect_crop_t;
+        left_crop.bottom += aspect_crop_b;
+
+        right_crop.left += aspect_crop_l;
+        right_crop.right += aspect_crop_r;
+        right_crop.top += aspect_crop_t;
+        right_crop.bottom += aspect_crop_b;
+    }
+
+    std::string scale_suffix = "";
+    if (stereo.preserve_size && stereo.original_width > 0 && stereo.original_height > 0) {
+        scale_suffix = " ! videoscale ! video/x-raw,width=" + std::to_string(stereo.original_width) + 
+                       ",height=" + std::to_string(stereo.original_height);
+    }
+
     std::string left_chain =
         stereo.left.source +
+        color_adjustment_string(stereo.left_color) +
         " ! queue max-size-buffers=1 leaky=downstream"
-        " ! videoconvert"
         " ! videocrop left=" + std::to_string(left_crop.left) +
         " right=" + std::to_string(left_crop.right) +
         " top=" + std::to_string(left_crop.top) +
-        " bottom=" + std::to_string(left_crop.bottom);
+        " bottom=" + std::to_string(left_crop.bottom) + scale_suffix;
     if (publish_left || has_glimages) {
         left_chain +=
             " ! tee name=__left_out__"
-            " __left_out__. ! queue max-size-buffers=1 leaky=downstream ! mix.sink_0";
+            " __left_out__. ! queue max-size-buffers=1 leaky=downstream ! glupload ! mix.sink_0";
         if (publish_left) {
             left_chain +=
                 " __left_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
@@ -518,53 +561,51 @@ std::string build_pipeline_string(
         }
         if (has_glimages) {
             left_chain +=
-                " __left_out__. ! queue max-size-buffers=1 leaky=downstream"
-                " ! videoconvert";
+                " __left_out__. ! queue max-size-buffers=1 leaky=downstream";
             if (include_overlay) {
-                left_chain += " ! cairooverlay name=left_overlay";
+                left_chain += " ! videoconvert ! cairooverlay name=left_overlay";
             }
             left_chain +=
-                " ! glimagesink name=__left_eye_sink__ sync=false force-aspect-ratio=false";
+                " ! glupload ! glimagesink name=__left_eye_sink__ sync=false force-aspect-ratio=false";
         }
     } else {
-        left_chain += " ! mix.sink_0";
+        left_chain += " ! glupload ! mix.sink_0";
     }
 
     std::string right_chain =
         stereo.right.source +
+        color_adjustment_string(stereo.right_color) +
         " ! queue max-size-buffers=1 leaky=downstream"
-        " ! videoconvert"
         " ! videocrop left=" + std::to_string(right_crop.left) +
         " right=" + std::to_string(right_crop.right) +
         " top=" + std::to_string(right_crop.top) +
-        " bottom=" + std::to_string(right_crop.bottom);
+        " bottom=" + std::to_string(right_crop.bottom) + scale_suffix;
     if (publish_right || has_glimages) {
         right_chain +=
             " ! tee name=__right_out__"
-            " __right_out__. ! queue max-size-buffers=1 leaky=downstream ! mix.sink_1";
+            " __right_out__. ! queue max-size-buffers=1 leaky=downstream ! glupload ! mix.sink_1";
         if (publish_right) {
             right_chain +=
                 " __right_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
                 " ! videoconvert ! video/x-raw,format=RGB"
-                " ! appsink name=__ros_right_sink__ sync=false async=false emit-signals=true drop=true max-buffers=1";
+                " ! appsink name=__ros_right_sink__ sync=false async=false emit-signals=true drop=true max-buffers=1"; // videoconvert from native YUV to RGB
         }
         if (has_glimages) {
             right_chain +=
-                " __right_out__. ! queue max-size-buffers=1 leaky=downstream"
-                " ! videoconvert";
+                " __right_out__. ! queue max-size-buffers=1 leaky=downstream";
             if (include_overlay) {
-                right_chain += " ! cairooverlay name=right_overlay";
+                right_chain += " ! videoconvert ! cairooverlay name=right_overlay";
             }
             right_chain +=
-                " ! glimagesink name=__right_eye_sink__ sync=false force-aspect-ratio=false";
+                " ! glupload ! glimagesink name=__right_eye_sink__ sync=false force-aspect-ratio=false";
         }
     } else {
-        right_chain += " ! mix.sink_1";
+        right_chain += " ! glupload ! mix.sink_1";
     }
 
     std::string output_chain =
-        "compositor name=mix sink_0::xpos=0 sink_1::xpos=" + std::to_string(eye_w) +
-        " ! video/x-raw,width=" + std::to_string(2 * eye_w) +
+        "glvideomixer name=mix sink_0::xpos=0 sink_1::xpos=" + std::to_string(eye_w) +
+        " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
         ",height=" + std::to_string(eye_h);
 
     const bool need_stereo_tee = has_glimage || stereo.has_unixfd_socket_path || publish_stereo;
@@ -573,9 +614,9 @@ std::string build_pipeline_string(
         if (has_glimage) {
             output_chain += "__stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
             if (include_overlay) {
-                output_chain += " ! cairooverlay name=stereo_overlay";
+                output_chain += " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay ! glupload";
             }
-            output_chain += " ! videoconvert ! glimagesink sync=false force-aspect-ratio=false";
+            output_chain += " ! glimagesink sync=false force-aspect-ratio=false";
         }
 
         if (stereo.has_unixfd_socket_path) {
@@ -588,12 +629,12 @@ std::string build_pipeline_string(
 
         if (publish_stereo) {
             output_chain += " __stereo_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
-                            " ! videoconvert ! video/x-raw,format=RGB"
+                            " ! gldownload ! videoconvert ! video/x-raw,format=RGB"
                             " ! appsink name=__ros_stereo_sink__ sync=false async=false emit-signals=true drop=true max-buffers=1";
         }
     } else {
         if (include_overlay) {
-            output_chain += " ! cairooverlay name=stereo_overlay";
+            output_chain += " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
         }
         output_chain += " ! fakesink sync=false";
     }
