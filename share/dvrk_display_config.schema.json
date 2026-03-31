@@ -1,20 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "sv::stereo_viewer_config@1.0.0",
-  "title": "dvrk_stereo_viewer configuration",
-  "description": "Configuration file for the dvrk_stereo_viewer node. Describes video sources, image geometry corrections, ROS publishing targets, and GStreamer output sinks.",
+  "$id": "sv::dvrk_display_config@1.0.0",
+  "title": "dvrk_display configuration",
+  "description": "Configuration file for the dvrk_display node. Describes video sources, image geometry corrections, ROS publishing targets, and the GStreamer output sink.",
   "type": "object",
   "required": ["type", "left_stream", "right_stream"],
   "additionalProperties": false,
   "properties": {
     "type": {
       "type": "string",
-      "const": "sv::stereo_viewer_config@1.0.0",
-      "description": "Schema type identifier. Must be exactly \"sv::stereo_viewer_config@1.0.0\". The application validates this field on startup and refuses to load a file with a mismatched type."
+      "const": "sv::dvrk_display_config@1.0.0",
+      "description": "Schema type identifier. Must be exactly \"sv::dvrk_display_config@1.0.0\". The application validates this field on startup and refuses to load a file with a mismatched type."
     },
     "name": {
       "type": "string",
-      "default": "dvrk_stereo_viewer",
+      "default": "dvrk_display",
       "description": "Name of the viewer instance. Used as the ROS node name and in log output."
     },
     "dvrk_console_namespace": {
@@ -77,22 +77,15 @@
       "type": "string",
       "description": "GStreamer pipeline fragment for the right camera source. Same format as left_stream. Must produce frames with the same dimensions and frame rate as left_stream."
     },
-    "sinks": {
-      "type": "array",
-      "default": ["glimage"],
-      "description": "Output sink selection list. Supported values: \"glimage\" (single stereo output window) and \"glimages\" (two output windows, one per eye).",
-      "items": {
-        "type": "string",
-        "enum": ["glimage", "glimages"]
-      },
-      "uniqueItems": false
+    "sink": {
+      "type": "string",
+      "enum": ["glimage", "custom"],
+      "default": "glimage",
+      "description": "Output sink type.\n  \"glimage\" (default) — uses \"glimagesink sync=false force-aspect-ratio=false\", suitable for GTK/OpenGL display.\n  \"custom\" — uses the string specified in the sink_stream field, allowing any GStreamer sink element."
     },
-    "sink_streams": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "description": "Resolved GStreamer sink stream list generated from sinks during initialization."
+    "sink_stream": {
+      "type": "string",
+      "description": "GStreamer sink element string used when sink is set to \"custom\". Ignored when sink is \"glimage\". Example: \"fpsdisplaysink video-sink=glimagesink sync=false\"."
     },
     "unixfd_socket_path": {
       "type": "string",

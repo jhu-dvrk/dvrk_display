@@ -41,6 +41,7 @@ struct OverlayState {
     int frame_width = 0;
     int frame_height = 0;
     double overlay_alpha = 0.7;
+    bool is_stereo = true;
     std::unordered_map<std::string, TeleopIndicator> teleop_indicators;
     std::unordered_map<std::string, ArmOverlayInfo> arm_info;
     std::mutex mutex;

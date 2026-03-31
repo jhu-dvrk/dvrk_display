@@ -1,0 +1,9 @@
+{
+  "type": "sv::mono_display_config@1.0.0",
+  "name": "dvrk_mono_display",
+  "left_stream": "v4l2src device=/dev/video0 ! video/x-raw,width=640,height=480",
+  "dvrk_console_namespace": "console",
+  "ros_image_publishers": ["mono"],
+  "overlay_alpha": 0.7,
+  "sinks": ["glimage"]
+}

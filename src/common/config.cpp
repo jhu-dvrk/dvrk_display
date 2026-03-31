@@ -58,9 +58,9 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.right_color = parse_color(root["right_color"]);
     }
 
-    cfg.name = root.get("name", "dvrk_stereo_viewer").asString();
+    cfg.name = root.get("name", "dvrk_display").asString();
     if (cfg.name.empty()) {
-        cfg.name = "dvrk_stereo_viewer";
+        cfg.name = "dvrk_display";
     }
     cfg.dvrk_console_namespace = root.get("dvrk_console_namespace", "console").asString();
     if (cfg.dvrk_console_namespace.empty()) {
@@ -109,6 +109,10 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
                 cfg.sink_streams.push_back("glimagesink sync=false force-aspect-ratio=false");
             }
         }
+    }
+    if (cfg.sink_streams.empty()) {
+        cfg.sinks.push_back("glimage");
+        cfg.sink_streams.push_back("glimagesink sync=false force-aspect-ratio=false");
     }
     if (root.isMember("unixfd_socket_path")) {
         cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();

@@ -20,7 +20,7 @@ struct ColorAdjustment {
 };
 
 struct AppConfig {
-    std::string name = "dvrk_stereo_viewer";
+    std::string name = "dvrk_display";
     std::string dvrk_console_namespace = "console";
     std::vector<std::string> ros_image_publishers;
     double overlay_alpha = 0.7;

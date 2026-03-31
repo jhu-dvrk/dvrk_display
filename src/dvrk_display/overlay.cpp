@@ -16,32 +16,6 @@ std::string format_tool_type_label(const std::string& raw_tool_type);
 
 namespace {
 
-enum class OverlayView {
-    Stereo,
-    LeftEye,
-    RightEye
-};
-
-OverlayView overlay_view_from_element(const GstElement* element) {
-    if (element == nullptr) {
-        return OverlayView::Stereo;
-    }
-
-    const char* element_name = GST_OBJECT_NAME(element);
-    if (element_name == nullptr) {
-        return OverlayView::Stereo;
-    }
-
-    const std::string name(element_name);
-    if (name == "left_overlay") {
-        return OverlayView::LeftEye;
-    }
-    if (name == "right_overlay") {
-        return OverlayView::RightEye;
-    }
-    return OverlayView::Stereo;
-}
-
 bool joy_active(const sensor_msgs::msg::Joy& msg) {
     const bool any_button_pressed = std::any_of(
         msg.buttons.begin(), msg.buttons.end(),
@@ -473,7 +447,7 @@ void on_overlay_caps_changed(GstElement*, GstCaps* caps, gpointer user_data) {
     overlay_state->frame_height = static_cast<int>(video_info.height);
 }
 
-void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointer user_data) {
+void on_overlay_draw(GstElement*, cairo_t* cr, guint64, guint64, gpointer user_data) {
     if (cr == nullptr || user_data == nullptr) {
         return;
     }
@@ -481,6 +455,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     auto* overlay_state = static_cast<OverlayState*>(user_data);
     bool camera_active = false;
     bool clutch_active = false;
+    bool is_stereo = true;
     int frame_width = 0;
     int frame_height = 0;
     double overlay_alpha = 0.7;
@@ -494,6 +469,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
         std::scoped_lock<std::mutex> lock(overlay_state->mutex);
         camera_active = overlay_state->has_camera && overlay_state->camera_active;
         clutch_active = overlay_state->has_clutch && overlay_state->clutch_active;
+        is_stereo = overlay_state->is_stereo;
         frame_width = overlay_state->frame_width;
         frame_height = overlay_state->frame_height;
         overlay_alpha = overlay_state->overlay_alpha;
@@ -523,9 +499,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
         return;
     }
 
-    const OverlayView overlay_view = overlay_view_from_element(overlay);
-    const bool is_stereo_layout = overlay_view == OverlayView::Stereo;
-    const double eye_width = is_stereo_layout ? static_cast<double>(frame_width) / 2.0 : static_cast<double>(frame_width);
+    const double eye_width = is_stereo ? static_cast<double>(frame_width) / 2.0 : static_cast<double>(frame_width);
     const double image_scale = std::min(eye_width, static_cast<double>(frame_height));
 
     // Ratios are based on previous pixel constants halved and normalized by a reference eye height (~425 px).
@@ -541,18 +515,14 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     const double bottom_margin = image_scale * k_overlay_margin_ratio;
     const double cy = static_cast<double>(frame_height) - bottom_margin;
 
-    if (is_stereo_layout) {
-        const double left_cx = static_cast<double>(frame_width) / 4.0;
-        draw_status_circle(cr, clutch_active, left_cx - spacing, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, left_cx + spacing, cy, radius, overlay_alpha);
+    const double left_cx = eye_width / 2.0;
+    draw_status_circle(cr, clutch_active, left_cx - spacing, cy, radius, overlay_alpha);
+    draw_status_circle(cr, camera_active, left_cx + spacing, cy, radius, overlay_alpha);
 
-        const double right_cx = 3.0 * static_cast<double>(frame_width) / 4.0;
+    if (is_stereo) {
+        const double right_cx = 3.0 * eye_width / 2.0;
         draw_status_circle(cr, clutch_active, right_cx - spacing, cy, radius, overlay_alpha);
         draw_status_circle(cr, camera_active, right_cx + spacing, cy, radius, overlay_alpha);
-    } else {
-        const double center_cx = static_cast<double>(frame_width) / 2.0;
-        draw_status_circle(cr, clutch_active, center_cx - spacing, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, center_cx + spacing, cy, radius, overlay_alpha);
     }
 
     std::sort(left_teleops.begin(), left_teleops.end(), [](const TeleopIndicator& a, const TeleopIndicator& b) {
@@ -574,25 +544,14 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
             : (arm_info.count(camera_teleop.arm_name) > 0
                    ? arm_info[camera_teleop.arm_name].measured_cp_valid
                    : true);
-        if (is_stereo_layout) {
-            for (int eye_index = 0; eye_index < 2; ++eye_index) {
-                const double eye_center_x = eye_width * (static_cast<double>(eye_index) + 0.5);
-                draw_camera_icon(
-                    cr,
-                    camera_teleop.following_active,
-                    camera_valid,
-                    eye_center_x,
-                    top_margin + psm_radius,
-                    psm_radius,
-                    overlay_alpha
-                );
-            }
-        } else {
+        const int num_eyes = is_stereo ? 2 : 1;
+        for (int eye_index = 0; eye_index < num_eyes; ++eye_index) {
+            const double eye_center_x = eye_width * (static_cast<double>(eye_index) + 0.5);
             draw_camera_icon(
                 cr,
                 camera_teleop.following_active,
                 camera_valid,
-                static_cast<double>(frame_width) / 2.0,
+                eye_center_x,
                 top_margin + psm_radius,
                 psm_radius,
                 overlay_alpha
@@ -600,58 +559,69 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
         }
     }
 
-    const auto draw_teleop_column = [&](const std::vector<TeleopIndicator>& teleops, const double x, const bool label_on_right) {
-        for (size_t index = 0; index < teleops.size(); ++index) {
+    const int num_eyes = is_stereo ? 2 : 1;
+    for (int eye_index = 0; eye_index < num_eyes; ++eye_index) {
+        const double eye_x_offset = eye_width * static_cast<double>(eye_index);
+        const double psm_left_x = eye_x_offset + psm_x_margin;
+        const double psm_right_x = eye_x_offset + eye_width - psm_x_margin;
+
+        for (size_t index = 0; index < left_teleops.size(); ++index) {
             const double psm_y = psm_base_y - static_cast<double>(index) * psm_y_step;
             draw_numbered_circle(
                 cr,
-                teleops[index].following_active,
-                arm_info.count(teleops[index].arm_name) > 0
-                    ? arm_info[teleops[index].arm_name].measured_cp_valid
+                left_teleops[index].following_active,
+                arm_info.count(left_teleops[index].arm_name) > 0
+                    ? arm_info[left_teleops[index].arm_name].measured_cp_valid
                     : true,
-                teleops[index].psm_number,
-                x,
+                left_teleops[index].psm_number,
+                psm_left_x,
                 psm_y,
                 psm_radius,
                 overlay_alpha
             );
 
-            const auto info_it = arm_info.find(teleops[index].arm_name);
+            const auto info_it = arm_info.find(left_teleops[index].arm_name);
             if (info_it != arm_info.end()) {
                 draw_tool_type_label(
                     cr,
                     info_it->second.tool_type,
-                    label_on_right,
-                    x,
+                    true,
+                    psm_left_x,
                     psm_y,
                     psm_radius,
                     overlay_alpha
                 );
             }
         }
-    };
 
-    if (is_stereo_layout) {
-        for (int eye_index = 0; eye_index < 2; ++eye_index) {
-            const double eye_x_offset = eye_width * static_cast<double>(eye_index);
-            const double psm_left_x = eye_x_offset + psm_x_margin;
-            const double psm_right_x = eye_x_offset + eye_width - psm_x_margin;
-            draw_teleop_column(left_teleops, psm_left_x, true);
-            draw_teleop_column(right_teleops, psm_right_x, false);
+        for (size_t index = 0; index < right_teleops.size(); ++index) {
+            const double psm_y = psm_base_y - static_cast<double>(index) * psm_y_step;
+            draw_numbered_circle(
+                cr,
+                right_teleops[index].following_active,
+                arm_info.count(right_teleops[index].arm_name) > 0
+                    ? arm_info[right_teleops[index].arm_name].measured_cp_valid
+                    : true,
+                right_teleops[index].psm_number,
+                psm_right_x,
+                psm_y,
+                psm_radius,
+                overlay_alpha
+            );
+
+            const auto info_it = arm_info.find(right_teleops[index].arm_name);
+            if (info_it != arm_info.end()) {
+                draw_tool_type_label(
+                    cr,
+                    info_it->second.tool_type,
+                    false,
+                    psm_right_x,
+                    psm_y,
+                    psm_radius,
+                    overlay_alpha
+                );
+            }
         }
-    } else {
-        // Single-eye layout: both PSM columns shown in every eye, only corner dot differs.
-        constexpr double k_eye_dot_radius_ratio = 2.0 / 425.0;
-        const double dot_r = image_scale * k_eye_dot_radius_ratio;
-        const double dot_x = overlay_view == OverlayView::LeftEye
-            ? dot_r
-            : static_cast<double>(frame_width) - dot_r;
-        cairo_new_path(cr);
-        cairo_arc(cr, dot_x, dot_r, dot_r, 0.0, 2.0 * M_PI);
-        cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, overlay_alpha);
-        cairo_fill(cr);
-        draw_teleop_column(left_teleops, psm_x_margin, true);
-        draw_teleop_column(right_teleops, static_cast<double>(frame_width) - psm_x_margin, false);
     }
 }
 

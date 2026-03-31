@@ -1,6 +1,6 @@
 {
-  "type": "sv::stereo_viewer_config@1.0.0",
-  "name": "dvrk_stereo_viewer",
+  "type": "sv::dvrk_display_config@1.0.0",
+  "name": "dvrk_display",
   "ros_image_publishers": ["stereo"],
   "dvrk_console_namespace": "console",
   "original_width": 640,
@@ -9,7 +9,6 @@
   "crop_height": 425,
   "horizontal_shift_px": -73,
   "vertical_shift_px": -53,
-  "sinks": ["glimage"],
   "left_stream": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1",
   "right_stream": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
 }

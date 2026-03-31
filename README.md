@@ -1,13 +1,13 @@
-# dvrk_stereo_viewer
+# dvrk_display
 
 Starter ROS 2 package for a dVRK-specific stereo viewer application.
 
 Current shell contents:
-- `dvrk_stereo_viewer` C++ node
+- `stereo` C++ node
 - JSON config loader using JsonCpp
 - GStreamer dependency wiring in CMake
-- `stereo_configurator` helper script
-- sample config under `share/stereo_viewer.json`
+- `stereo_calibration` helper script
+- sample config under `share/dvrk_display.json`
 
 The current node loads one or more JSON config files and builds a side-by-side GStreamer pipeline from root-level stereo settings.
 
@@ -30,10 +30,10 @@ Set `"dvrk_console_namespace"` in the JSON root to choose the namespace prefix. 
 Both subscriptions use transient-local durability (latched/persistent behavior), and the decoded status is rendered as the same overlay on both left and right channels.
 
 `unixfd_socket_path` behavior:
-- omitted: unixfd publishing enabled with default path `/tmp/dvrk_stereo_viewer_<user>.sock`
+- omitted: unixfd publishing enabled with default path `/tmp/dvrk_display_<user>.sock`
 - empty string: unixfd publishing disabled
 - non-empty path: publish to that exact socket path
 
-Config type tag is `dc::stereo_viewer_config@1.0.0`.
+Config type tag is `sv::dvrk_display_config@1.0.0`.
 
 At startup, the node always logs unixfd status. If unixfd is requested but the runtime doesn't provide a compatible FD upload path, unixfd is automatically disabled with a warning and the viewer continues.
