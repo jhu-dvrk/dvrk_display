@@ -11,6 +11,7 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/header.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -51,6 +52,8 @@ struct RosImagePublisherContext {
 };
 
 static GMainLoop *g_main_loop = nullptr;
+static rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr
+    g_timestamp_pub = nullptr;
 
 int clip_int(const int value, const int min_value, const int max_value) {
   return std::max(min_value, std::min(max_value, value));
@@ -428,6 +431,30 @@ GstFlowReturn on_new_ros_image_sample(GstElement *sink, gpointer user_data) {
   return GST_FLOW_OK;
 }
 
+GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
+                                              gpointer user_data) {
+  (void)pad;
+  (void)user_data;
+  if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long long cpu_timestamp =
+        static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+
+    if (g_timestamp_pub) {
+      auto msg = std_msgs::msg::Header();
+      // pts -> stamp
+      msg.stamp.sec = GST_BUFFER_PTS(buf) / 1000000000LL;
+      msg.stamp.nanosec = GST_BUFFER_PTS(buf) % 1000000000LL;
+      // cpu_ts -> frame_id (stringified nanoseconds)
+      msg.frame_id = std::to_string(cpu_timestamp);
+      g_timestamp_pub->publish(msg);
+    }
+  }
+  return GST_PAD_PROBE_OK;
+}
+
 gboolean on_sigint(gpointer) {
   if (g_main_loop != nullptr) {
     g_main_loop_quit(g_main_loop);
@@ -562,7 +589,8 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string left_chain =
-      stereo.left.source + color_adjustment_string(stereo.left_color) +
+      stereo.left.source + " ! queue name=__left_src_q__ max-size-buffers=1 leaky=downstream" +
+      color_adjustment_string(stereo.left_color) +
       " ! queue max-size-buffers=1 leaky=downstream"
       " ! videocrop left=" +
       std::to_string(left_crop.left) +
@@ -594,7 +622,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string right_chain =
-      stereo.right.source + color_adjustment_string(stereo.right_color) +
+      stereo.right.source + " ! queue name=__right_src_q__ " + color_adjustment_string(stereo.right_color) +
       " ! queue max-size-buffers=1 leaky=downstream"
       " ! videocrop left=" +
       std::to_string(right_crop.left) +
@@ -786,6 +814,10 @@ int main(int argc, char *argv[]) {
 
   warn_if_interlaced_stream(app_cfg.left.source, node->get_logger(), "left");
   warn_if_interlaced_stream(app_cfg.right.source, node->get_logger(), "right");
+
+  // Initialize timestamp publisher with reliable QoS
+  g_timestamp_pub = node->create_publisher<std_msgs::msg::Header>(
+      "sub_unixfd_ts", rclcpp::QoS(100).reliable());
 
   if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
       app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
@@ -1050,6 +1082,24 @@ int main(int argc, char *argv[]) {
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
   gst_bus_add_watch(bus, on_bus_message, nullptr);
   gst_object_unref(bus);
+
+  // Attach probes to named source queues to catch PTS + CPU timestamps early
+  GstElement *left_q = gst_bin_get_by_name(GST_BIN(pipeline), "__left_src_q__");
+  if (left_q) {
+    GstPad *pad = gst_element_get_static_pad(left_q, "src");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, source_timestamp_probe_cb,
+                      nullptr, nullptr);
+    gst_object_unref(pad);
+    gst_object_unref(left_q);
+  }
+  GstElement *right_q = gst_bin_get_by_name(GST_BIN(pipeline), "__right_src_q__");
+  if (right_q) {
+    GstPad *pad = gst_element_get_static_pad(right_q, "src");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, source_timestamp_probe_cb,
+                      nullptr, nullptr);
+    gst_object_unref(pad);
+    gst_object_unref(right_q);
+  }
 
   if (overlay_available) {
     bool found_overlay = false;
