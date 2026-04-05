@@ -14,8 +14,10 @@
 #include <std_msgs/msg/header.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -54,6 +56,64 @@ struct RosImagePublisherContext {
 static GMainLoop *g_main_loop = nullptr;
 static rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr
     g_timestamp_pub = nullptr;
+static std::atomic<std::uint64_t> g_unixfd_offset_counter{0};
+
+typedef struct _CpuTimestampMeta {
+  GstMeta meta;
+  gint64 cpu_timestamp_ns;
+} CpuTimestampMeta;
+
+GType cpu_timestamp_meta_api_get_type(void) {
+  static GType type = 0;
+  static const gchar *tags[] = {"cpu_timestamp", nullptr};
+  if (g_once_init_enter(&type)) {
+    GType new_type = gst_meta_api_type_register("CpuTimestampMetaAPI", tags);
+    g_once_init_leave(&type, new_type);
+  }
+  return type;
+}
+
+const GstMetaInfo *cpu_timestamp_meta_get_info(void) {
+  static const GstMetaInfo *meta_info = nullptr;
+  if (g_once_init_enter(&meta_info)) {
+    const GstMetaInfo *new_meta_info = gst_meta_register(
+        cpu_timestamp_meta_api_get_type(), "CpuTimestampMeta",
+        sizeof(CpuTimestampMeta),
+        [](GstMeta *meta, gpointer, GstBuffer *) -> gboolean {
+          reinterpret_cast<CpuTimestampMeta *>(meta)->cpu_timestamp_ns = 0;
+          return TRUE;
+        },
+        [](GstMeta *, GstBuffer *) -> void {},
+        [](GstBuffer *dest, GstMeta *meta, GstBuffer *, GQuark,
+           gpointer) -> gboolean {
+          const auto *src_meta = reinterpret_cast<CpuTimestampMeta *>(meta);
+          auto *dest_meta = reinterpret_cast<CpuTimestampMeta *>(
+              gst_buffer_add_meta(dest, cpu_timestamp_meta_get_info(), nullptr));
+          if (dest_meta == nullptr) {
+            return FALSE;
+          }
+          dest_meta->cpu_timestamp_ns = src_meta->cpu_timestamp_ns;
+          return TRUE;
+        });
+    g_once_init_leave(&meta_info, new_meta_info);
+  }
+  return meta_info;
+}
+
+CpuTimestampMeta *gst_buffer_add_cpu_timestamp_meta(GstBuffer *buffer,
+                                                    gint64 cpu_timestamp_ns) {
+  auto *meta = reinterpret_cast<CpuTimestampMeta *>(
+      gst_buffer_add_meta(buffer, cpu_timestamp_meta_get_info(), nullptr));
+  if (meta != nullptr) {
+    meta->cpu_timestamp_ns = cpu_timestamp_ns;
+  }
+  return meta;
+}
+
+CpuTimestampMeta *gst_buffer_get_cpu_timestamp_meta(GstBuffer *buffer) {
+  return reinterpret_cast<CpuTimestampMeta *>(
+      gst_buffer_get_meta(buffer, cpu_timestamp_meta_api_get_type()));
+}
 
 int clip_int(const int value, const int min_value, const int max_value) {
   return std::max(min_value, std::min(max_value, value));
@@ -261,7 +321,7 @@ std::string resolve_unixfd_socket_path(const sv::AppConfig &stereo) {
     struct passwd *pw = getpwuid(getuid());
     username = pw ? pw->pw_name : "unknown";
   }
-  return "/tmp/dvrk_display_" + std::string(username) + ".sock";
+  return "/tmp/" + stereo.name + "_" + std::string(username) + ".sock";
 }
 
 bool check_element_available(const std::string &element_name) {
@@ -437,17 +497,31 @@ GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
   (void)user_data;
   if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    long long cpu_timestamp =
-        static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    if (!gst_buffer_is_writable(buf)) {
+      buf = gst_buffer_make_writable(buf);
+      GST_PAD_PROBE_INFO_DATA(info) = buf;
+    }
+
+    long long cpu_timestamp = 0;
+    if (auto *meta = gst_buffer_get_cpu_timestamp_meta(buf)) {
+      cpu_timestamp = meta->cpu_timestamp_ns;
+    }
+    if (cpu_timestamp == 0) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      cpu_timestamp =
+          static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+      gst_buffer_add_cpu_timestamp_meta(buf, cpu_timestamp);
+    }
+
+    const std::uint64_t remote_offset = g_unixfd_offset_counter.fetch_add(1);
+    GST_BUFFER_OFFSET(buf) = remote_offset;
+    GST_BUFFER_OFFSET_END(buf) = remote_offset + 1;
 
     if (g_timestamp_pub) {
       auto msg = std_msgs::msg::Header();
-      // pts -> stamp
-      msg.stamp.sec = GST_BUFFER_PTS(buf) / 1000000000LL;
-      msg.stamp.nanosec = GST_BUFFER_PTS(buf) % 1000000000LL;
-      // cpu_ts -> frame_id (stringified nanoseconds)
+      msg.stamp.sec = static_cast<int32_t>((remote_offset >> 32) & 0xffffffffULL);
+      msg.stamp.nanosec = static_cast<uint32_t>(remote_offset & 0xffffffffULL);
       msg.frame_id = std::to_string(cpu_timestamp);
       g_timestamp_pub->publish(msg);
     }
@@ -459,7 +533,7 @@ gboolean on_sigint(gpointer) {
   if (g_main_loop != nullptr) {
     g_main_loop_quit(g_main_loop);
   }
-  return G_SOURCE_CONTINUE;
+  return G_SOURCE_REMOVE;
 }
 
 gboolean on_ros_spin(gpointer user_data) {
@@ -589,9 +663,8 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string left_chain =
-      stereo.left.source + " ! queue name=__left_src_q__ max-size-buffers=1 leaky=downstream" +
+      stereo.left.source + " ! queue name=__left_src_q__ max-size-buffers=2 leaky=downstream " +
       color_adjustment_string(stereo.left_color) +
-      " ! queue max-size-buffers=1 leaky=downstream"
       " ! videocrop left=" +
       std::to_string(left_crop.left) +
       " right=" + std::to_string(left_crop.right) +
@@ -622,8 +695,8 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string right_chain =
-      stereo.right.source + " ! queue name=__right_src_q__ " + color_adjustment_string(stereo.right_color) +
-      " ! queue max-size-buffers=1 leaky=downstream"
+      stereo.right.source + " ! queue name=__right_src_q__ max-size-buffers=2 leaky=downstream " +
+      color_adjustment_string(stereo.right_color) +
       " ! videocrop left=" +
       std::to_string(right_crop.left) +
       " right=" + std::to_string(right_crop.right) +
@@ -682,6 +755,8 @@ build_pipeline_string(const sv::AppConfig &stereo,
                       "max-size-time=0 max-size-bytes=0 leaky=downstream"
                       " ! " +
                       unixfd_upload_chain +
+              " ! queue name=__unixfd_ts_q__ max-size-buffers=2 "
+              "max-size-time=0 max-size-bytes=0 leaky=downstream"
                       " ! unixfdsink socket-path=" + socket_path +
                       " sync=true async=false";
     }
@@ -817,7 +892,7 @@ int main(int argc, char *argv[]) {
 
   // Initialize timestamp publisher with reliable QoS
   g_timestamp_pub = node->create_publisher<std_msgs::msg::Header>(
-      "sub_unixfd_ts", rclcpp::QoS(100).reliable());
+      app_cfg.name + "/unixfd_timestamps", rclcpp::QoS(100).reliable());
 
   if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
       app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
@@ -1083,22 +1158,16 @@ int main(int argc, char *argv[]) {
   gst_bus_add_watch(bus, on_bus_message, nullptr);
   gst_object_unref(bus);
 
-  // Attach probes to named source queues to catch PTS + CPU timestamps early
-  GstElement *left_q = gst_bin_get_by_name(GST_BIN(pipeline), "__left_src_q__");
-  if (left_q) {
-    GstPad *pad = gst_element_get_static_pad(left_q, "src");
-    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, source_timestamp_probe_cb,
-                      nullptr, nullptr);
-    gst_object_unref(pad);
-    gst_object_unref(left_q);
-  }
-  GstElement *right_q = gst_bin_get_by_name(GST_BIN(pipeline), "__right_src_q__");
-  if (right_q) {
-    GstPad *pad = gst_element_get_static_pad(right_q, "src");
-    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, source_timestamp_probe_cb,
-                      nullptr, nullptr);
-    gst_object_unref(pad);
-    gst_object_unref(right_q);
+  GstElement *unixfd_q =
+      gst_bin_get_by_name(GST_BIN(pipeline), "__unixfd_ts_q__");
+  if (unixfd_q) {
+    GstPad *pad = gst_element_get_static_pad(unixfd_q, "src");
+    if (pad != nullptr) {
+      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                        source_timestamp_probe_cb, nullptr, nullptr);
+      gst_object_unref(pad);
+    }
+    gst_object_unref(unixfd_q);
   }
 
   if (overlay_available) {
@@ -1175,6 +1244,8 @@ int main(int argc, char *argv[]) {
 
   g_main_loop_unref(g_main_loop);
   g_main_loop = nullptr;
+
+  g_timestamp_pub.reset();
 
   rclcpp::shutdown();
   return 0;
