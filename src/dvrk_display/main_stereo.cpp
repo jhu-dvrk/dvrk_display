@@ -145,6 +145,23 @@ int clamp_offset_to_valid(const int working_size, const int eye_size,
   return clip_int(offset_px, min_offset, max_offset);
 }
 
+int normalize_eye_size_for_even_crop(const int working_size,
+                                     const int requested_eye_size) {
+  if (working_size <= 0) {
+    return std::max(1, requested_eye_size);
+  }
+
+  int eye_size = clip_int(requested_eye_size, 1, working_size);
+  if (((working_size - eye_size) & 1) != 0) {
+    if (eye_size > 1) {
+      --eye_size;
+    } else if (eye_size < working_size) {
+      ++eye_size;
+    }
+  }
+  return eye_size;
+}
+
 std::pair<int, int> compute_axis_starts(const int crop_total,
                                         const int offset_px) {
   const int center = crop_total / 2;
@@ -591,10 +608,10 @@ std::string
 build_pipeline_string(const sv::AppConfig &stereo,
                       const std::vector<RosImageTarget> &ros_targets,
                       const bool include_overlay) {
-  int base_crop_w =
-      stereo.crop_width > 0 ? stereo.crop_width : stereo.original_width;
-  int base_crop_h =
-      stereo.crop_height > 0 ? stereo.crop_height : stereo.original_height;
+  int base_crop_w = stereo.crop_width > 0 ? stereo.crop_width : stereo.original_width;
+  int base_crop_h = stereo.crop_height > 0 ? stereo.crop_height : stereo.original_height;
+  base_crop_w = normalize_eye_size_for_even_crop(stereo.original_width, base_crop_w);
+  base_crop_h = normalize_eye_size_for_even_crop(stereo.original_height, base_crop_h);
 
   int aspect_crop_l = 0, aspect_crop_r = 0, aspect_crop_t = 0,
       aspect_crop_b = 0;
@@ -663,7 +680,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string left_chain =
-      stereo.left.source + " ! queue name=__left_src_q__ max-size-buffers=2 leaky=downstream " +
+      stereo.left.source + " ! queue name=__left_src_q__ max-size-buffers=8 leaky=downstream " +
       color_adjustment_string(stereo.left_color) +
       " ! videocrop left=" +
       std::to_string(left_crop.left) +
@@ -695,7 +712,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string right_chain =
-      stereo.right.source + " ! queue name=__right_src_q__ max-size-buffers=2 leaky=downstream " +
+      stereo.right.source + " ! queue name=__right_src_q__ max-size-buffers=8 leaky=downstream " +
       color_adjustment_string(stereo.right_color) +
       " ! videocrop left=" +
       std::to_string(right_crop.left) +
@@ -729,8 +746,14 @@ build_pipeline_string(const sv::AppConfig &stereo,
   }
 
   std::string output_chain =
-      "glvideomixer name=mix sink_0::xpos=0 sink_1::xpos=" +
+      "glvideomixer name=mix "
+      "sink_0::xpos=0 sink_0::ypos=0 "
+      "sink_0::width=" +
+      std::to_string(eye_w) + " sink_0::height=" + std::to_string(eye_h) +
+      " sink_1::xpos=" +
       std::to_string(eye_w) +
+      " sink_1::ypos=0 sink_1::width=" + std::to_string(eye_w) +
+      " sink_1::height=" + std::to_string(eye_h) +
       " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
       ",height=" + std::to_string(eye_h);
 
