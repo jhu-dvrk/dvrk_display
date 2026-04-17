@@ -484,6 +484,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     int frame_width = 0;
     int frame_height = 0;
     double overlay_alpha = 0.7;
+    int display_horizontal_offset_px = 0;
     std::unordered_map<std::string, ArmOverlayInfo> arm_info;
     std::vector<TeleopIndicator> left_teleops;
     std::vector<TeleopIndicator> right_teleops;
@@ -497,6 +498,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
         frame_width = overlay_state->frame_width;
         frame_height = overlay_state->frame_height;
         overlay_alpha = overlay_state->overlay_alpha;
+        display_horizontal_offset_px = overlay_state->display_horizontal_offset_px;
         arm_info = overlay_state->arm_info;
 
         for (const auto& [_, indicator] : overlay_state->teleop_indicators) {
@@ -528,6 +530,8 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     const double eye_width = is_stereo_layout ? static_cast<double>(frame_width) / 2.0 : static_cast<double>(frame_width);
     const double image_scale = std::min(eye_width, static_cast<double>(frame_height));
 
+    const double horizontal_ui_scale = (eye_width > 0) ? (eye_width - 2.0 * std::abs(static_cast<double>(display_horizontal_offset_px))) / eye_width : 1.0;
+
     // Ratios are based on previous pixel constants halved and normalized by a reference eye height (~425 px).
     constexpr double k_status_radius_ratio = 10.0 / 425.0;
     constexpr double k_status_spacing_ratio = 15.0 / 425.0;
@@ -542,13 +546,15 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     const double cy = static_cast<double>(frame_height) - bottom_margin;
 
     if (is_stereo_layout) {
-        const double left_cx = static_cast<double>(frame_width) / 4.0;
-        draw_status_circle(cr, clutch_active, left_cx - spacing, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, left_cx + spacing, cy, radius, overlay_alpha);
+        const double left_baseline_cx = (eye_width / 2.0) - static_cast<double>(display_horizontal_offset_px) / 2.0;
+        const double left_cx = left_baseline_cx;
+        draw_status_circle(cr, clutch_active, left_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, camera_active, left_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
 
-        const double right_cx = 3.0 * static_cast<double>(frame_width) / 4.0;
-        draw_status_circle(cr, clutch_active, right_cx - spacing, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, right_cx + spacing, cy, radius, overlay_alpha);
+        const double right_baseline_cx = eye_width + (eye_width / 2.0) + static_cast<double>(display_horizontal_offset_px) / 2.0;
+        const double right_cx = right_baseline_cx;
+        draw_status_circle(cr, clutch_active, right_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, camera_active, right_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
     } else {
         const double center_cx = static_cast<double>(frame_width) / 2.0;
         draw_status_circle(cr, clutch_active, center_cx - spacing, cy, radius, overlay_alpha);
@@ -576,7 +582,8 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
                    : true);
         if (is_stereo_layout) {
             for (int eye_index = 0; eye_index < 2; ++eye_index) {
-                const double eye_center_x = eye_width * (static_cast<double>(eye_index) + 0.5);
+                const double offset = (eye_index == 0) ? -static_cast<double>(display_horizontal_offset_px) / 2.0 : static_cast<double>(display_horizontal_offset_px) / 2.0;
+                const double eye_center_x = (eye_width * (static_cast<double>(eye_index) + 0.5)) + offset;
                 draw_camera_icon(
                     cr,
                     camera_teleop.following_active,
@@ -634,8 +641,10 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     if (is_stereo_layout) {
         for (int eye_index = 0; eye_index < 2; ++eye_index) {
             const double eye_x_offset = eye_width * static_cast<double>(eye_index);
-            const double psm_left_x = eye_x_offset + psm_x_margin;
-            const double psm_right_x = eye_x_offset + eye_width - psm_x_margin;
+            const double shift = (eye_index == 0) ? -static_cast<double>(display_horizontal_offset_px) / 2.0 : static_cast<double>(display_horizontal_offset_px) / 2.0;
+
+            const double psm_left_x = eye_x_offset + (eye_width / 2.0) + shift - (eye_width / 2.0) * horizontal_ui_scale + psm_x_margin * horizontal_ui_scale;
+            const double psm_right_x = eye_x_offset + (eye_width / 2.0) + shift + (eye_width / 2.0) * horizontal_ui_scale - psm_x_margin * horizontal_ui_scale;
             draw_teleop_column(left_teleops, psm_left_x, true);
             draw_teleop_column(right_teleops, psm_right_x, false);
         }

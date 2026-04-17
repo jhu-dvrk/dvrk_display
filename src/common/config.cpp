@@ -93,6 +93,9 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     if (root.isMember("vertical_shift_px")) {
         cfg.vertical_shift_px = root["vertical_shift_px"].asInt();
     }
+    if (root.isMember("display_horizontal_offset_px")) {
+        cfg.display_horizontal_offset_px = root["display_horizontal_offset_px"].asInt();
+    }
     cfg.preserve_size = root.get("preserve_size", true).asBool();
     if (root.isMember("sinks") && root["sinks"].isArray()) {
         for (const auto& item : root["sinks"]) {

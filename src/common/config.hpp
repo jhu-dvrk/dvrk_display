@@ -35,6 +35,7 @@ struct AppConfig {
     int crop_height = 0;
     int horizontal_shift_px = 0;
     int vertical_shift_px = 0;
+    int display_horizontal_offset_px = 0;
     bool preserve_size = true;
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;

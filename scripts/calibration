@@ -6,10 +6,16 @@ import select
 from pathlib import Path
 import sys
 import termios
+import threading
+import time
 import tty
 
 import cv2
 import numpy as np
+
+import crtk
+import dvrk
+
 
 KEY_UP = "UP"
 KEY_DOWN = "DOWN"
@@ -21,6 +27,10 @@ KEY_QUIT = "q"
 KEY_FULLSCREEN = "f"
 KEY_RESET_SHIFT = "r"
 KEY_COLOR_CALIBRATE = "c"
+KEY_LINE_LEFT = "["
+KEY_LINE_RIGHT = "]"
+KEY_LINE_TOGGLE = "g"
+KEY_PSM_OSCILLATE = "p"
 
 
 class TerminalInput:
@@ -35,34 +45,44 @@ class TerminalInput:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
 
     def get_key(self):
-        if select.select([sys.stdin], [], [], 0)[0]:
+        # Read the most recent key only to prevent buffering lag
+        key = None
+        while select.select([sys.stdin], [], [], 0)[0]:
             ch = sys.stdin.read(1)
             if ch == "\x1b":
                 ch2 = sys.stdin.read(1)
                 if ch2 == "[":
                     ch3 = sys.stdin.read(1)
                     if ch3 == "A":
-                        return KEY_UP
-                    if ch3 == "B":
-                        return KEY_DOWN
-                    if ch3 == "C":
-                        return KEY_RIGHT
-                    if ch3 == "D":
-                        return KEY_LEFT
-                return None
+                        key = KEY_UP
+                    elif ch3 == "B":
+                        key = KEY_DOWN
+                    elif ch3 == "C":
+                        key = KEY_RIGHT
+                    elif ch3 == "D":
+                        key = KEY_LEFT
+                continue
             if ch in ("q", "Q"):
-                return KEY_QUIT
-            if ch in ("f", "F"):
-                return KEY_FULLSCREEN
-            if ch in ("+", "="):
-                return KEY_PLUS
-            if ch in ("-", "_"):
-                return KEY_MINUS
-            if ch in ("r", "R"):
-                return KEY_RESET_SHIFT
-            if ch in ("c", "C"):
-                return KEY_COLOR_CALIBRATE
-        return None
+                key = KEY_QUIT
+            elif ch in ("f", "F"):
+                key = KEY_FULLSCREEN
+            elif ch in ("+", "="):
+                key = KEY_PLUS
+            elif ch in ("-", "_"):
+                key = KEY_MINUS
+            elif ch in ("r", "R"):
+                key = KEY_RESET_SHIFT
+            elif ch in ("c", "C"):
+                key = KEY_COLOR_CALIBRATE
+            elif ch == "[":
+                key = KEY_LINE_LEFT
+            elif ch == "]":
+                key = KEY_LINE_RIGHT
+            elif ch in ("g", "G"):
+                key = KEY_LINE_TOGGLE
+            elif ch in ("p", "P"):
+                key = KEY_PSM_OSCILLATE
+        return key
 
 
 def clip_int(value: int, min_value: int, max_value: int) -> int:
@@ -218,6 +238,7 @@ def ensure_config_fields(config):
     config.setdefault("crop_height", 0)
     config.setdefault("horizontal_shift_px", 0)
     config.setdefault("vertical_shift_px", 0)
+    config.setdefault("display_horizontal_offset_px", 0)
     config.setdefault("left_stream", "")
     config.setdefault("right_stream", "")
     config.setdefault("sinks", ["glimage"])
@@ -242,6 +263,7 @@ def load_or_create(path: Path):
         "crop_height": 0,
         "horizontal_shift_px": 0,
         "vertical_shift_px": 0,
+        "display_horizontal_offset_px": 0,
         "left_stream": "",
         "right_stream": "",
         "sinks": ["glimage"],
@@ -262,6 +284,7 @@ def parse_args():
     parser.add_argument("-l", "--left", help="Left source GStreamer snippet")
     parser.add_argument("-r", "--right", help="Right source GStreamer snippet")
     parser.add_argument("-s", "--split", action="store_true", help="Split stereo view in two windows")
+    parser.add_argument("-p", "--psm", help="PSM name to oscillate, e.g. PSM1")
     return parser.parse_args()
 
 
@@ -272,7 +295,7 @@ def apply_stream_overrides(config, args):
         config["right_stream"] = args.right
 
 
-def update_config_from_runtime(config, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, left_color, right_color):
+def update_config_from_runtime(config, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, display_horizontal_offset, left_color, right_color):
     config["type"] = "dd::display_config@1.0.0"
     config.setdefault("name", "dvrk_display")
 
@@ -284,15 +307,55 @@ def update_config_from_runtime(config, left_stream, right_stream, original_w, or
     config["crop_height"] = int(crop_h)
     config["horizontal_shift_px"] = int(horizontal_shift)
     config["vertical_shift_px"] = int(vertical_shift)
+    config["display_horizontal_offset_px"] = int(display_horizontal_offset)
     config["left_color"] = left_color
     config["right_color"] = right_color
 
 
-def interactive_tune(config, split_mode=False):
+def interactive_tune(config, split_mode=False, psm_name=None):
     left_stream = config.get("left_stream", "").strip()
     right_stream = config.get("right_stream", "").strip()
     if not left_stream or not right_stream:
         raise RuntimeError("Both left_stream and right_stream are required")
+
+    ral = None
+    arm = None
+    oscillating = False
+    oscillation_start_time = 0.0
+    oscillation_amplitude = np.pi / 4.0 # 45 degrees, total 90 (quarter turn)
+    oscillation_frequency = 0.5 # 0.5 Hz
+    initial_jp = None
+
+    oscillation_lock = threading.Lock()
+    def oscillation_thread():
+        nonlocal oscillating, oscillation_start_time, initial_jp
+        rate = ral.create_rate(500) # 500 Hz
+        while rclpy.ok():
+            with oscillation_lock:
+                is_oscillating = oscillating
+                start_time = oscillation_start_time
+                base_jp = initial_jp
+
+            if is_oscillating and arm:
+                elapsed = time.time() - start_time
+                offset = oscillation_amplitude * np.sin(2 * np.pi * oscillation_frequency * elapsed)
+                target_jp = np.copy(base_jp)
+                target_jp[3] = base_jp[3] + offset
+                arm.servo_jp(target_jp)
+            rate.sleep()
+
+    if psm_name:
+        import rclpy
+        ral = crtk.ral("dvrk_calibration_gui")
+        arm = dvrk.psm(ral, psm_name)
+        # Spin in background thread for CRTK
+        ral.spin()
+        # Give some time for publishers/subscribers to connect
+        time.sleep(0.5)
+
+        # Start background thread for high-frequency oscillation
+        t_osc = threading.Thread(target=oscillation_thread, daemon=True)
+        t_osc.start()
 
     left_cap = open_capture("left", left_stream)
     right_cap = open_capture("right", right_stream)
@@ -325,6 +388,8 @@ def interactive_tune(config, split_mode=False):
 
     horizontal_shift = int(config.get("horizontal_shift_px", 0))
     vertical_shift = int(config.get("vertical_shift_px", 0))
+    display_horizontal_offset = int(config.get("display_horizontal_offset_px", 0))
+    show_grid = False
     horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
     vertical_shift = clamp_offset_to_valid(original_h, crop_h, vertical_shift)
     
@@ -366,10 +431,16 @@ def interactive_tune(config, split_mode=False):
         f"left={left_w}x{left_h}, right={right_w}x{right_h}, "
         f"original={original_w}x{original_h}"
     )
-    print("Controls: +/- resize (1%), arrows=shift, r=reset shift, c=color calib, f=fullscreen, q=quit")
+    print("Controls: +/- resize (1%), arrows=shift, r=reset shift, c=color calib, g=toggle grid, f=fullscreen, q=quit, p=PSM oscillation")
+
+    # Initialize grid for calibration
+    grid_rows = 3
+    grid_cols = 4
+    grid_colors = [tuple(np.random.randint(0, 256, 3).tolist()) for _ in range(grid_rows * grid_cols)]
 
     with TerminalInput() as term:
         while True:
+            # OpenCV Loop (Display and Key Handling)
             ok_left, left_frame = left_cap.read()
             ok_right, right_frame = right_cap.read()
             if not ok_left or left_frame is None:
@@ -401,6 +472,39 @@ def interactive_tune(config, split_mode=False):
             left_preview = apply_color_calibration_preview(left_out, left_color_calibration)
             right_preview = apply_color_calibration_preview(right_out, right_color_calibration)
 
+            if show_grid:
+                curr_h, curr_w = left_preview.shape[:2]
+                center_x = curr_w // 2
+
+                # Square size: 5% of height (using height to keep them square-ish)
+                square_size = int(curr_h * 0.05)
+                
+                # Calculate padding to fill ~80% of the view
+                span_w = int(curr_w * 0.8)
+                span_h = int(curr_h * 0.8)
+                padding_x = (span_w - grid_cols * square_size) // (grid_cols - 1)
+                padding_y = (span_h - grid_rows * square_size) // (grid_rows - 1)
+
+                grid_w = grid_cols * square_size + (grid_cols - 1) * padding_x
+                grid_h = grid_rows * square_size + (grid_rows - 1) * padding_y
+
+                # Draw on both eyes
+                for eye_idx, preview in enumerate([left_preview, right_preview]):
+                    sign = -1 if eye_idx == 0 else 1
+                    cx = int(center_x + sign * display_horizontal_offset / 2.0)
+                    start_x = cx - grid_w // 2
+                    start_y = curr_h // 2 - grid_h // 2
+
+                    for r in range(grid_rows):
+                        for c in range(grid_cols):
+                            x = start_x + c * (square_size + padding_x)
+                            y = start_y + r * (square_size + padding_y)
+                            color = grid_colors[r * grid_cols + c]
+                            cv2.rectangle(preview, (x, y), (x + square_size, y + square_size), color, -1)
+                
+                # Print debug to terminal (optional, but helps user see it's working)
+                # print(f"Display Offset: {display_horizontal_offset}", end='\r')
+
             preview = np.hstack([left_preview, right_preview])
 
             h_min, h_max = offset_valid_range(original_w, crop_w)
@@ -410,9 +514,10 @@ def interactive_tune(config, split_mode=False):
                 f"original:{original_w}x{original_h} crop:{crop_w}x{crop_h} "
                 f"resize:{resize_percent}% "
                 f"shift(h,v):({horizontal_shift},{vertical_shift}) "
+                f"display_offset:{display_horizontal_offset} "
                 f"color mode:{mode_name}"
             )
-            controls = "+/-:size  arrows:shift  r:reset  c:color calib  f:fullscreen  q:save+quit"
+            controls = "+/-:size arrows:cam_shift r:reset c:color g:grid []:display_shift f:fs q:quit"
             
             if split_mode:
                 cv2.putText(left_preview, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
@@ -454,13 +559,13 @@ def interactive_tune(config, split_mode=False):
                 cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, mode)
                 cv2.setWindowProperty(window_name, cv2.WND_PROP_ASPECT_RATIO, aspect)
             elif key == KEY_LEFT:
-                horizontal_shift -= 1
+                horizontal_shift -= 2
             elif key == KEY_RIGHT:
-                horizontal_shift += 1
+                horizontal_shift += 2
             elif key == KEY_UP:
-                vertical_shift -= 1
+                vertical_shift -= 2
             elif key == KEY_DOWN:
-                vertical_shift += 1
+                vertical_shift += 2
             elif key == KEY_PLUS:
                 resize_percent = clip_int(resize_percent + 1, 100, 200)
             elif key == KEY_MINUS:
@@ -472,6 +577,32 @@ def interactive_tune(config, split_mode=False):
                 current_color_mode_idx = (current_color_mode_idx + 1) % len(color_calibration_modes)
                 mode_name = color_calibration_modes[current_color_mode_idx]
                 left_color_calibration, right_color_calibration = calculate_calibration(mode_name, left_out, right_out)
+            elif key == KEY_LINE_TOGGLE:
+                show_grid = not show_grid
+            elif key == KEY_LINE_LEFT:
+                display_horizontal_offset -= 2
+                # print(f"display_horizontal_offset: {display_horizontal_offset}")
+            elif key == KEY_LINE_RIGHT:
+                display_horizontal_offset += 2
+                # print(f"display_horizontal_offset: {display_horizontal_offset}")
+            elif key == KEY_PSM_OSCILLATE:
+                if arm:
+                    if not oscillating:
+                        with oscillation_lock:
+                            initial_jp_val, _ = arm.setpoint_jp()
+                            # Use a copy of initial_jp to maintain setpoints
+                            initial_jp = np.array(initial_jp_val)
+                            oscillation_start_time = time.time()
+                            oscillating = True
+                        print(f"Starting oscillation on {psm_name} joint 4...")
+                    else:
+                        with oscillation_lock:
+                            oscillating = False
+                        # Return to initial position
+                        arm.move_jp(initial_jp)
+                        print(f"Stopped oscillation on {psm_name}.")
+                else:
+                    print("Error: No PSM specified for oscillation. Use -p/--psm [PSM name].")
 
     left_cap.release()
     right_cap.release()
@@ -487,6 +618,7 @@ def interactive_tune(config, split_mode=False):
         "resize_percent": int(resize_percent),
         "horizontal_shift_px": int(horizontal_shift),
         "vertical_shift_px": int(vertical_shift),
+        "display_horizontal_offset_px": int(display_horizontal_offset),
         "left_color": left_color_calibration,
         "right_color": right_color_calibration,
     }
@@ -506,7 +638,7 @@ def main():
     apply_stream_overrides(config, args)
 
     try:
-        runtime_values = interactive_tune(config, split_mode=args.split)
+        runtime_values = interactive_tune(config, split_mode=args.split, psm_name=args.psm)
     except RuntimeError as exc:
         print(f"Error: {exc}")
         return 1
@@ -521,6 +653,7 @@ def main():
         runtime_values["crop_height"],
         runtime_values["horizontal_shift_px"],
         runtime_values["vertical_shift_px"],
+        runtime_values["display_horizontal_offset_px"],
         runtime_values["left_color"],
         runtime_values["right_color"]
     )

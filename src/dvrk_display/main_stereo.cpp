@@ -627,9 +627,16 @@ build_pipeline_string(const sv::AppConfig &stereo,
     right_chain += " ! glupload ! mix.sink_1";
   }
 
+  const double horizontal_ui_scale = (eye_w > 0) ? (static_cast<double>(eye_w) - 2.0 * std::abs(static_cast<double>(stereo.display_horizontal_offset_px))) / static_cast<double>(eye_w) : 1.0;
+  const int shifted_eye_w = static_cast<int>(std::round(static_cast<double>(eye_w) * horizontal_ui_scale));
+  const int left_xpos = (eye_w / 2) - stereo.display_horizontal_offset_px / 2 - (shifted_eye_w / 2);
+  const int right_xpos = eye_w + (eye_w / 2) + stereo.display_horizontal_offset_px / 2 - (shifted_eye_w / 2);
+
   std::string output_chain =
-      "glvideomixer name=mix sink_0::xpos=0 sink_1::xpos=" +
-      std::to_string(eye_w) +
+      "glvideomixer name=mix background=1 sink_0::xpos=" + std::to_string(left_xpos) +
+      " sink_0::width=" + std::to_string(shifted_eye_w) +
+      " sink_1::xpos=" + std::to_string(right_xpos) +
+      " sink_1::width=" + std::to_string(shifted_eye_w) +
       " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
       ",height=" + std::to_string(eye_h);
 
@@ -753,6 +760,7 @@ int main(int argc, char *argv[]) {
   RCLCPP_INFO(node->get_logger(), "Loaded viewer config: %s", cfg.name.c_str());
   console_name = cfg.dvrk_console_namespace;
   overlay_state->overlay_alpha = cfg.overlay_alpha;
+  overlay_state->display_horizontal_offset_px = cfg.display_horizontal_offset_px;
   selected_viewer_name = cfg.name.empty() ? "dvrk_display" : cfg.name;
   const sv::AppConfig &app_cfg = cfg;
 
