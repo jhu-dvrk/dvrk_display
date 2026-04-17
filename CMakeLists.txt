@@ -28,12 +28,15 @@ target_include_directories(dvrk_display PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/common>
   $<INSTALL_INTERFACE:include>
   ${JSONCPP_INCLUDE_DIRS}
+  ${GST_INCLUDE_DIRS}
 )
 target_compile_options(dvrk_display PRIVATE
   ${JSONCPP_CFLAGS_OTHER}
+  ${GST_CFLAGS_OTHER}
 )
 target_link_libraries(dvrk_display
   ${JSONCPP_LIBRARIES}
+  ${GST_LIBRARIES}
 )
 ament_target_dependencies(dvrk_display
   ament_index_cpp
