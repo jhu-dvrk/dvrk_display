@@ -159,7 +159,7 @@ void draw_tool_type_label(
     cairo_text_extents_t extents;
     cairo_text_extents(cr, display_tool_type.c_str(), &extents);
 
-    constexpr double k_label_gap = 6.0;
+    constexpr double k_label_gap = 12.0;
     constexpr double k_label_lower_offset = 0.75;
     const double text_x = left_side
         ? (cx + radius + k_label_gap)
@@ -613,12 +613,12 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     const double horizontal_ui_scale = (eye_width > 0) ? (eye_width - 2.0 * std::abs(static_cast<double>(display_horizontal_offset_px))) / eye_width : 1.0;
 
     // Ratios are based on previous pixel constants halved and normalized by a reference eye height (~425 px).
-    constexpr double k_status_radius_ratio = 10.0 / 425.0;
+    constexpr double k_status_radius_ratio = 6.4 / 425.0;
     constexpr double k_status_spacing_ratio = 15.0 / 425.0;
-    constexpr double k_overlay_margin_ratio = 16.0 / 425.0;
-    constexpr double k_psm_radius_ratio = 11.0 / 425.0;
-    constexpr double k_psm_x_margin_ratio = 27.5 / 425.0;
-    constexpr double k_psm_y_step_ratio = 26.0 / 425.0;
+    constexpr double k_overlay_margin_ratio = 12.0 / 425.0;
+    constexpr double k_psm_radius_ratio = 7.0 / 425.0;
+    constexpr double k_psm_x_margin_ratio = 55.0 / 425.0;
+    constexpr double k_psm_y_step_ratio = 20.0 / 425.0;
 
     const double radius = image_scale * k_status_radius_ratio;
     const double spacing = image_scale * k_status_spacing_ratio;
