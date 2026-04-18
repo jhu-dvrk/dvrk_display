@@ -13,6 +13,9 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/header.hpp>
 
+#include <gtkmm.h>
+#include <gst/video/navigation.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -53,7 +56,7 @@ struct RosImagePublisherContext {
   image_transport::CameraPublisher publisher;
 };
 
-static GMainLoop *g_main_loop = nullptr;
+static Glib::RefPtr<Gtk::Application> g_app;
 static rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr
     g_timestamp_pub = nullptr;
 static std::atomic<std::uint64_t> g_unixfd_offset_counter{0};
@@ -547,8 +550,8 @@ GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
 }
 
 gboolean on_sigint(gpointer) {
-  if (g_main_loop != nullptr) {
-    g_main_loop_quit(g_main_loop);
+  if (g_app) {
+    g_app->quit();
   }
   return G_SOURCE_REMOVE;
 }
@@ -569,8 +572,8 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
   }
 
   if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
-    if (g_main_loop != nullptr) {
-      g_main_loop_quit(g_main_loop);
+    if (g_app) {
+      g_app->quit();
     }
   } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
     GError *err = nullptr;
@@ -585,8 +588,8 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
     if (err != nullptr) {
       g_error_free(err);
     }
-    if (g_main_loop != nullptr) {
-      g_main_loop_quit(g_main_loop);
+    if (g_app) {
+      g_app->quit();
     }
   }
 
@@ -704,7 +707,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
       if (include_overlay) {
         left_chain += " ! videoconvert ! cairooverlay name=left_overlay";
       }
-      left_chain += " ! glupload ! glimagesink name=__left_eye_sink__ "
+      left_chain += " ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__ "
                     "sync=false force-aspect-ratio=false";
     }
   } else {
@@ -738,7 +741,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
       if (include_overlay) {
         right_chain += " ! videoconvert ! cairooverlay name=right_overlay";
       }
-      right_chain += " ! glupload ! glimagesink name=__right_eye_sink__ "
+      right_chain += " ! glupload ! glcolorconvert ! gtkglsink name=__right_eye_sink__ "
                      "sync=false force-aspect-ratio=false";
     }
   } else {
@@ -769,7 +772,7 @@ build_pipeline_string(const sv::AppConfig &stereo,
         output_chain += " ! gldownload ! videoconvert ! cairooverlay "
                         "name=stereo_overlay ! glupload";
       }
-      output_chain += " ! glimagesink sync=false force-aspect-ratio=false";
+      output_chain += " ! glcolorconvert ! gtkglsink sync=false force-aspect-ratio=false name=__stereo_sink__";
     }
 
     if (stereo.has_unixfd_socket_path) {
@@ -802,6 +805,74 @@ build_pipeline_string(const sv::AppConfig &stereo,
 
   return left_chain + " " + right_chain + " " + output_chain;
 }
+
+class ControlWindow : public Gtk::Window {
+public:
+  ControlWindow(std::shared_ptr<sv::OverlayState> overlay_state, GstElement* pipeline)
+      : m_overlay_state(overlay_state), m_pipeline(pipeline) {
+    set_title("dVRK Display Control");
+    set_border_width(10);
+    set_default_size(250, 120);
+
+    m_vbox.set_orientation(Gtk::ORIENTATION_VERTICAL);
+    m_vbox.set_spacing(10);
+    add(m_vbox);
+
+    m_btn_overlay.set_label("Overlay On/Off");
+    m_btn_overlay.set_active(true);
+    m_btn_overlay.signal_toggled().connect(sigc::mem_fun(*this, &ControlWindow::on_overlay_toggled));
+    m_vbox.pack_start(m_btn_overlay);
+
+    m_btn_fullscreen.set_label("Fullscreen On/Off");
+    m_btn_fullscreen.set_active(false);
+    m_btn_fullscreen.signal_toggled().connect(sigc::mem_fun(*this, &ControlWindow::on_fullscreen_toggled));
+    m_vbox.pack_start(m_btn_fullscreen);
+
+    show_all_children();
+
+    const std::vector<std::string> sink_names = {"__left_eye_sink__", "__right_eye_sink__", "__stereo_sink__"};
+    for (const auto& name : sink_names) {
+      GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), name.c_str());
+      if (sink) {
+        GtkWidget *gtk_widget = nullptr;
+        g_object_get(sink, "widget", &gtk_widget, NULL);
+        if (gtk_widget) {
+          auto win = std::make_unique<Gtk::Window>();
+          win->set_title(name == "__stereo_sink__" ? "Stereo Display" : (name == "__left_eye_sink__" ? "Left Eye Display" : "Right Eye Display"));
+          win->set_default_size(1280, 720);
+          Gtk::Widget* mm_widget = Glib::wrap(gtk_widget);
+          win->add(*mm_widget);
+          win->show_all();
+          m_display_windows.push_back(std::make_pair(name, std::move(win)));
+        }
+        gst_object_unref(sink);
+      }
+    }
+  }
+
+protected:
+  void on_overlay_toggled() {
+    std::scoped_lock<std::mutex> lock(m_overlay_state->mutex);
+    m_overlay_state->overlay_enabled = m_btn_overlay.get_active();
+  }
+
+  void on_fullscreen_toggled() {
+    bool active = m_btn_fullscreen.get_active();
+    for (auto& pair : m_display_windows) {
+      if (pair.first == "__stereo_sink__") {
+        if (active) pair.second->fullscreen();
+        else pair.second->unfullscreen();
+      }
+    }
+  }
+
+  std::shared_ptr<sv::OverlayState> m_overlay_state;
+  GstElement* m_pipeline;
+  Gtk::Box m_vbox;
+  Gtk::ToggleButton m_btn_overlay;
+  Gtk::ToggleButton m_btn_fullscreen;
+  std::vector<std::pair<std::string, std::unique_ptr<Gtk::Window>>> m_display_windows;
+};
 
 } // namespace
 
@@ -986,14 +1057,15 @@ int main(int argc, char *argv[]) {
 
   const std::string camera_topic = "/" + console_name + "/camera";
   const std::string clutch_topic = "/" + console_name + "/clutch";
+  const std::string operator_present_topic = "/" + console_name + "/operator_present";
   const std::string teleop_selected_topic =
       "/" + console_name + "/teleop/selected";
   const std::string teleop_unselected_topic =
       "/" + console_name + "/teleop/unselected";
   RCLCPP_INFO(node->get_logger(),
-              "Console topics: camera=%s clutch=%s teleop_selected=%s "
+              "Console topics: camera=%s clutch=%s operator_present=%s teleop_selected=%s "
               "teleop_unselected=%s",
-              camera_topic.c_str(), clutch_topic.c_str(),
+              camera_topic.c_str(), clutch_topic.c_str(), operator_present_topic.c_str(),
               teleop_selected_topic.c_str(), teleop_unselected_topic.c_str());
 
   const auto latch_qos =
@@ -1013,6 +1085,12 @@ int main(int argc, char *argv[]) {
       clutch_topic, latch_qos,
       [overlay_state](const sensor_msgs::msg::Joy::SharedPtr msg) {
         sv::on_clutch_joy(msg, overlay_state);
+      });
+
+  auto operator_present_sub = node->create_subscription<sensor_msgs::msg::Joy>(
+      operator_present_topic, latch_qos,
+      [overlay_state](const sensor_msgs::msg::Joy::SharedPtr msg) {
+        sv::on_operator_present(msg, overlay_state);
       });
 
   auto following_subscribers_cache = std::make_shared<std::unordered_map<
@@ -1244,7 +1322,7 @@ int main(int argc, char *argv[]) {
     gst_object_unref(ros_sink);
   }
 
-  g_main_loop = g_main_loop_new(nullptr, FALSE);
+  g_app = Gtk::Application::create("org.dvrk.display");
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
   g_unix_signal_add(SIGTERM, on_sigint, nullptr);
   g_timeout_add(20, on_ros_spin, node.get());
@@ -1253,12 +1331,16 @@ int main(int argc, char *argv[]) {
 
   (void)camera_sub;
   (void)clutch_sub;
+  (void)operator_present_sub;
   (void)teleop_selected_sub;
   (void)teleop_unselected_sub;
 
+  ControlWindow window(overlay_state, pipeline);
+
   gst_element_set_state(pipeline, GST_STATE_PLAYING);
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline started");
-  g_main_loop_run(g_main_loop);
+
+  g_app->run(window);
 
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline on quit: %s",
               pipeline_string.c_str());
@@ -1267,8 +1349,7 @@ int main(int argc, char *argv[]) {
   gst_element_set_state(pipeline, GST_STATE_NULL);
   gst_object_unref(pipeline);
 
-  g_main_loop_unref(g_main_loop);
-  g_main_loop = nullptr;
+  g_app.reset();
 
   g_timestamp_pub.reset();
 

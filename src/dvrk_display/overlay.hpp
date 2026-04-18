@@ -12,12 +12,29 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <chrono>
 
 namespace sv {
 
 enum class TeleopSide {
     Left,
     Right
+};
+
+struct ButtonState {
+    bool present = false;
+    bool active = false;
+    std::chrono::steady_clock::time_point expiration;
+
+    int get_status() const {
+        if (active) return 1;
+        if (std::chrono::steady_clock::now() < expiration) return 2;
+        return 0;
+    }
+
+    bool is_active() const {
+        return get_status() != 0;
+    }
 };
 
 struct TeleopIndicator {
@@ -34,12 +51,13 @@ struct ArmOverlayInfo {
 };
 
 struct OverlayState {
-    bool has_camera = false;
-    bool has_clutch = false;
-    bool camera_active = false;
-    bool clutch_active = false;
+    ButtonState camera;
+    ButtonState clutch;
+    ButtonState operator_present;
+
     int frame_width = 0;
     int frame_height = 0;
+    bool overlay_enabled = true;
     double overlay_alpha = 0.7;
     int display_horizontal_offset_px = 0;
     std::unordered_map<std::string, TeleopIndicator> teleop_indicators;
@@ -90,6 +108,11 @@ void on_camera_joy(
 );
 
 void on_clutch_joy(
+    const sensor_msgs::msg::Joy::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+);
+
+void on_operator_present(
     const sensor_msgs::msg::Joy::SharedPtr msg,
     const std::shared_ptr<OverlayState>& overlay_state
 );

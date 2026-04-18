@@ -42,26 +42,16 @@ OverlayView overlay_view_from_element(const GstElement* element) {
     return OverlayView::Stereo;
 }
 
-bool joy_active(const sensor_msgs::msg::Joy& msg) {
-    const bool any_button_pressed = std::any_of(
-        msg.buttons.begin(), msg.buttons.end(),
-        [](const int value) {
-            return value != 0;
-        }
-    );
-    if (any_button_pressed) {
-        return true;
+int get_joy_state(const sensor_msgs::msg::Joy& msg) {
+    bool has_two = false;
+    for (const int value : msg.buttons) {
+        if (value == 1) return 1;
+        if (value == 2) has_two = true;
     }
-
-    return std::any_of(
-        msg.axes.begin(), msg.axes.end(),
-        [](const float value) {
-            return std::abs(value) > 0.5F;
-        }
-    );
+    return has_two ? 2 : 0;
 }
 
-void draw_status_circle(cairo_t* cr, const bool active, const double cx, const double cy, const double radius, const double alpha) {
+void draw_status_circle(cairo_t* cr, const int status, const double cx, const double cy, const double radius, const double alpha) {
     const double corner_radius = radius * 0.28;
 
     cairo_new_path(cr);
@@ -87,8 +77,12 @@ void draw_status_circle(cairo_t* cr, const bool active, const double cx, const d
     );
     cairo_close_path(cr);
 
-    if (active) {
-        cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, alpha);
+    if (status != 0) {
+        if (status == 2) {
+            cairo_set_source_rgba(cr, 0.2, 0.8, 0.2, alpha);
+        } else {
+            cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, alpha);
+        }
         cairo_fill(cr);
     } else {
         cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, alpha);
@@ -222,6 +216,66 @@ void draw_camera_icon(
     cairo_set_source_rgba(cr, outline_r, outline_g, outline_b, alpha);
     cairo_set_line_width(cr, 2.0);
     cairo_stroke(cr);
+}
+
+void draw_operator_present_icon(
+    cairo_t* cr,
+    const int status,
+    const double cx,
+    const double cy,
+    const double radius,
+    const double alpha
+) {
+    const double outline_r = 0.82;
+    const double outline_g = 0.82;
+    const double outline_b = 0.82;
+
+    const double body_height = radius * 1.6;
+    const double body_width = body_height * (5.0 / 3.0);
+    const double x_left = cx - body_width * 0.5;
+    const double y_top = cy - body_height * 0.5;
+    const double corner_radius = body_height * 0.12;
+
+    cairo_new_path(cr);
+    cairo_move_to(cr, x_left + corner_radius, y_top);
+    cairo_line_to(cr, x_left + body_width - corner_radius, y_top);
+    cairo_arc(cr, x_left + body_width - corner_radius, y_top + corner_radius, corner_radius, -0.5 * M_PI, 0.0);
+    cairo_line_to(cr, x_left + body_width, y_top + body_height - corner_radius);
+    cairo_arc(cr, x_left + body_width - corner_radius, y_top + body_height - corner_radius, corner_radius, 0.0, 0.5 * M_PI);
+    cairo_line_to(cr, x_left + corner_radius, y_top + body_height);
+    cairo_arc(cr, x_left + corner_radius, y_top + body_height - corner_radius, corner_radius, 0.5 * M_PI, M_PI);
+    cairo_line_to(cr, x_left, y_top + corner_radius);
+    cairo_arc(cr, x_left + corner_radius, y_top + corner_radius, corner_radius, M_PI, 1.5 * M_PI);
+    cairo_close_path(cr);
+
+    if (status != 0) {
+        if (status == 2) {
+            cairo_set_source_rgba(cr, 0.2, 0.8, 0.2, alpha);
+        } else {
+            cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, alpha);
+        }
+        cairo_fill_preserve(cr);
+    }
+
+    cairo_set_source_rgba(cr, outline_r, outline_g, outline_b, alpha);
+    cairo_set_line_width(cr, 2.5);
+    cairo_stroke(cr);
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, radius * 0.9);
+    cairo_text_extents_t extents;
+    cairo_text_extents(cr, "OP", &extents);
+    cairo_move_to(
+        cr,
+        cx - (extents.width / 2.0 + extents.x_bearing),
+        cy - (extents.height / 2.0 + extents.y_bearing)
+    );
+    if (status != 0) {
+        cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, alpha);
+    } else {
+        cairo_set_source_rgba(cr, outline_r, outline_g, outline_b, alpha);
+    }
+    cairo_show_text(cr, "OP");
 }
 
 }  // namespace
@@ -439,13 +493,25 @@ void on_teleop_tool_type(
     overlay_state->arm_info[psm_name].tool_type = msg->data;
 }
 
+void update_button_state(const sensor_msgs::msg::Joy::SharedPtr msg, ButtonState& btn) {
+    if (msg == nullptr) return;
+    btn.present = true;
+    int state = get_joy_state(*msg);
+    if (state == 1) {
+        btn.active = true;
+    } else if (state == 2) {
+        btn.expiration = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    } else {
+        btn.active = false;
+    }
+}
+
 void on_camera_joy(
     const sensor_msgs::msg::Joy::SharedPtr msg,
     const std::shared_ptr<OverlayState>& overlay_state
 ) {
     std::scoped_lock<std::mutex> lock(overlay_state->mutex);
-    overlay_state->has_camera = true;
-    overlay_state->camera_active = joy_active(*msg);
+    update_button_state(msg, overlay_state->camera);
 }
 
 void on_clutch_joy(
@@ -453,8 +519,15 @@ void on_clutch_joy(
     const std::shared_ptr<OverlayState>& overlay_state
 ) {
     std::scoped_lock<std::mutex> lock(overlay_state->mutex);
-    overlay_state->has_clutch = true;
-    overlay_state->clutch_active = joy_active(*msg);
+    update_button_state(msg, overlay_state->clutch);
+}
+
+void on_operator_present(
+    const sensor_msgs::msg::Joy::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+) {
+    std::scoped_lock<std::mutex> lock(overlay_state->mutex);
+    update_button_state(msg, overlay_state->operator_present);
 }
 
 void on_overlay_caps_changed(GstElement*, GstCaps* caps, gpointer user_data) {
@@ -479,8 +552,10 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     }
 
     auto* overlay_state = static_cast<OverlayState*>(user_data);
-    bool camera_active = false;
-    bool clutch_active = false;
+    int camera_status = 0;
+    int clutch_status = 0;
+    bool has_operator_present = false;
+    int operator_present_status = 0;
     int frame_width = 0;
     int frame_height = 0;
     double overlay_alpha = 0.7;
@@ -493,8 +568,13 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
 
     {
         std::scoped_lock<std::mutex> lock(overlay_state->mutex);
-        camera_active = overlay_state->has_camera && overlay_state->camera_active;
-        clutch_active = overlay_state->has_clutch && overlay_state->clutch_active;
+        if (!overlay_state->overlay_enabled) {
+            return;
+        }
+        camera_status = overlay_state->camera.present ? overlay_state->camera.get_status() : 0;
+        clutch_status = overlay_state->clutch.present ? overlay_state->clutch.get_status() : 0;
+        has_operator_present = overlay_state->operator_present.present;
+        operator_present_status = overlay_state->operator_present.present ? overlay_state->operator_present.get_status() : 0;
         frame_width = overlay_state->frame_width;
         frame_height = overlay_state->frame_height;
         overlay_alpha = overlay_state->overlay_alpha;
@@ -545,20 +625,32 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     const double bottom_margin = image_scale * k_overlay_margin_ratio;
     const double cy = static_cast<double>(frame_height) - bottom_margin;
 
+    const double psm_radius = image_scale * k_psm_radius_ratio;
+    const double psm_x_margin = image_scale * k_psm_x_margin_ratio;
+    const double psm_y_step = image_scale * k_psm_y_step_ratio;
+    const double psm_base_y = cy;
+    const double top_margin = image_scale * k_overlay_margin_ratio;
+
+    // Draw background strips
+    cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.5);
+    // Bottom strip (full width)
+    cairo_rectangle(cr, 0, frame_height - 2.0 * bottom_margin, frame_width, 2.0 * bottom_margin);
+    cairo_fill(cr);
+
     if (is_stereo_layout) {
         const double left_baseline_cx = (eye_width / 2.0) - static_cast<double>(display_horizontal_offset_px) / 2.0;
         const double left_cx = left_baseline_cx;
-        draw_status_circle(cr, clutch_active, left_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, left_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, clutch_status, left_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, camera_status, left_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
 
         const double right_baseline_cx = eye_width + (eye_width / 2.0) + static_cast<double>(display_horizontal_offset_px) / 2.0;
         const double right_cx = right_baseline_cx;
-        draw_status_circle(cr, clutch_active, right_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, right_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, clutch_status, right_cx - spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
+        draw_status_circle(cr, camera_status, right_cx + spacing * horizontal_ui_scale, cy, radius, overlay_alpha);
     } else {
         const double center_cx = static_cast<double>(frame_width) / 2.0;
-        draw_status_circle(cr, clutch_active, center_cx - spacing, cy, radius, overlay_alpha);
-        draw_status_circle(cr, camera_active, center_cx + spacing, cy, radius, overlay_alpha);
+        draw_status_circle(cr, clutch_status, center_cx - spacing, cy, radius, overlay_alpha);
+        draw_status_circle(cr, camera_status, center_cx + spacing, cy, radius, overlay_alpha);
     }
 
     std::sort(left_teleops.begin(), left_teleops.end(), [](const TeleopIndicator& a, const TeleopIndicator& b) {
@@ -568,42 +660,66 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
         return a.psm_number < b.psm_number;
     });
 
-    const double psm_radius = image_scale * k_psm_radius_ratio;
-    const double psm_x_margin = image_scale * k_psm_x_margin_ratio;
-    const double psm_y_step = image_scale * k_psm_y_step_ratio;
-    const double psm_base_y = cy;
-    const double top_margin = image_scale * k_overlay_margin_ratio;
+    const bool show_op = has_operator_present;
+    const bool show_cam = has_camera_teleop;
 
-    if (has_camera_teleop) {
-        const bool camera_valid = camera_teleop.arm_name.empty()
-            ? true
-            : (arm_info.count(camera_teleop.arm_name) > 0
-                   ? arm_info[camera_teleop.arm_name].measured_cp_valid
-                   : true);
+    if (show_op || show_cam) {
+        bool camera_valid = true;
+        if (show_cam) {
+            camera_valid = camera_teleop.arm_name.empty()
+                ? true
+                : (arm_info.count(camera_teleop.arm_name) > 0
+                       ? arm_info[camera_teleop.arm_name].measured_cp_valid
+                       : true);
+        }
+
+        auto draw_top_icons = [&](const double cx) {
+            const double top_icon_margin = top_margin * 0.4;
+            const double cy_top = top_icon_margin + psm_radius * 0.8;
+            const double top_spacing = psm_radius * 2.0; // wider spacing for rectangular icons
+            const double body_width = psm_radius * 1.6 * (5.0 / 3.0);
+            
+            double bg_x_left = cx;
+            double bg_width = 0;
+            
+            if (show_op && show_cam) {
+                bg_x_left = cx - top_spacing - body_width * 0.5;
+                bg_width = 2.0 * top_spacing + body_width;
+            } else if (show_op || show_cam) {
+                bg_x_left = cx - body_width * 0.5;
+                bg_width = body_width;
+            }
+            
+            const double bg_padding_x = psm_radius * 0.8;
+            const double bg_padding_bottom = psm_radius * 0.6;
+            
+            cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.5);
+            cairo_rectangle(cr, 
+                bg_x_left - bg_padding_x, 
+                0, 
+                bg_width + 2.0 * bg_padding_x, 
+                cy_top + psm_radius * 0.8 + bg_padding_bottom
+            );
+            cairo_fill(cr);
+
+            if (show_op && show_cam) {
+                draw_operator_present_icon(cr, operator_present_status, cx - top_spacing, cy_top, psm_radius, overlay_alpha);
+                draw_camera_icon(cr, camera_teleop.following_active, camera_valid, cx + top_spacing, cy_top, psm_radius, overlay_alpha);
+            } else if (show_op) {
+                draw_operator_present_icon(cr, operator_present_status, cx, cy_top, psm_radius, overlay_alpha);
+            } else if (show_cam) {
+                draw_camera_icon(cr, camera_teleop.following_active, camera_valid, cx, cy_top, psm_radius, overlay_alpha);
+            }
+        };
+
         if (is_stereo_layout) {
             for (int eye_index = 0; eye_index < 2; ++eye_index) {
                 const double offset = (eye_index == 0) ? -static_cast<double>(display_horizontal_offset_px) / 2.0 : static_cast<double>(display_horizontal_offset_px) / 2.0;
                 const double eye_center_x = (eye_width * (static_cast<double>(eye_index) + 0.5)) + offset;
-                draw_camera_icon(
-                    cr,
-                    camera_teleop.following_active,
-                    camera_valid,
-                    eye_center_x,
-                    top_margin + psm_radius,
-                    psm_radius,
-                    overlay_alpha
-                );
+                draw_top_icons(eye_center_x);
             }
         } else {
-            draw_camera_icon(
-                cr,
-                camera_teleop.following_active,
-                camera_valid,
-                static_cast<double>(frame_width) / 2.0,
-                top_margin + psm_radius,
-                psm_radius,
-                overlay_alpha
-            );
+            draw_top_icons(static_cast<double>(frame_width) / 2.0);
         }
     }
 

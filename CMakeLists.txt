@@ -20,6 +20,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
 pkg_check_modules(JSONCPP REQUIRED jsoncpp)
 pkg_check_modules(CAIRO REQUIRED cairo)
+pkg_check_modules(GTKMM REQUIRED gtkmm-3.0)
 
 add_library(dvrk_display
   src/common/config.cpp
@@ -57,16 +58,19 @@ target_include_directories(stereo PRIVATE
   ${GST_INCLUDE_DIRS}
   ${JSONCPP_INCLUDE_DIRS}
   ${CAIRO_INCLUDE_DIRS}
+  ${GTKMM_INCLUDE_DIRS}
 )
 target_compile_options(stereo PRIVATE
   ${GST_CFLAGS_OTHER}
   ${JSONCPP_CFLAGS_OTHER}
   ${CAIRO_CFLAGS_OTHER}
+  ${GTKMM_CFLAGS_OTHER}
 )
 target_link_libraries(stereo
   ${GST_LIBRARIES}
   ${JSONCPP_LIBRARIES}
   ${CAIRO_LIBRARIES}
+  ${GTKMM_LIBRARIES}
   dvrk_display
 )
 
