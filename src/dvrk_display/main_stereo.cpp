@@ -1340,6 +1340,16 @@ int main(int argc, char *argv[]) {
   gst_element_set_state(pipeline, GST_STATE_PLAYING);
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline started");
 
+  if (app_cfg.has_unixfd_socket_path) {
+    const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
+    if (std::filesystem::exists(unixfd_socket_path)) {
+      RCLCPP_INFO(node->get_logger(),
+                  "Removing stale unixfd socket: %s",
+                  unixfd_socket_path.c_str());
+      std::filesystem::remove(unixfd_socket_path);
+    }
+  }
+
   g_app->run(window);
 
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline on quit: %s",
