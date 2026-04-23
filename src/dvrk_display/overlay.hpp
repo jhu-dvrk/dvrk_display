@@ -7,6 +7,7 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include <unordered_map>
 #include <memory>
@@ -43,6 +44,8 @@ struct TeleopIndicator {
     int psm_number = 0;
     bool is_camera_teleop = false;
     bool following_active = false;
+    double scale = 1.0;
+    std::string current_state;
 };
 
 struct ArmOverlayInfo {
@@ -87,6 +90,16 @@ void on_teleop_unselected(
 void on_teleop_following(
     const std::string& teleop_name,
     const std_msgs::msg::Bool::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+);
+void on_teleop_scale(
+    const std::string& teleop_name,
+    const std_msgs::msg::Float64::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+);
+void on_teleop_current_state(
+    const std::string& teleop_name,
+    const std_msgs::msg::String::SharedPtr msg,
     const std::shared_ptr<OverlayState>& overlay_state
 );
 

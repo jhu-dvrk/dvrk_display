@@ -12,6 +12,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/header.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include <gtkmm.h>
 #include <gst/video/navigation.h>
@@ -859,10 +860,8 @@ protected:
   void on_fullscreen_toggled() {
     bool active = m_btn_fullscreen.get_active();
     for (auto& pair : m_display_windows) {
-      if (pair.first == "__stereo_sink__") {
-        if (active) pair.second->fullscreen();
-        else pair.second->unfullscreen();
-      }
+      if (active) pair.second->fullscreen();
+      else pair.second->unfullscreen();
     }
   }
 
@@ -1100,6 +1099,10 @@ int main(int argc, char *argv[]) {
       rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr>>();
   auto tool_type_subscribers_cache = std::make_shared<std::unordered_map<
       std::string, rclcpp::Subscription<std_msgs::msg::String>::SharedPtr>>();
+  auto scale_subscribers_cache = std::make_shared<std::unordered_map<
+      std::string, rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr>>();
+  auto state_subscribers_cache = std::make_shared<std::unordered_map<
+      std::string, rclcpp::Subscription<std_msgs::msg::String>::SharedPtr>>();
   auto active_teleops = std::make_shared<std::unordered_set<std::string>>();
   auto latest_teleop_by_mtm =
       std::make_shared<std::unordered_map<std::string, std::string>>();
@@ -1107,6 +1110,8 @@ int main(int argc, char *argv[]) {
       teleop_selected_topic, teleop_selected_qos,
       [node, overlay_state, following_subscribers_cache,
        measured_cp_subscribers_cache, tool_type_subscribers_cache,
+       scale_subscribers_cache,
+       state_subscribers_cache,
        active_teleops, latest_teleop_by_mtm, latch_qos, measured_cp_qos,
        persistent_event_qos](const std_msgs::msg::String::SharedPtr msg) {
         if (msg == nullptr) {
@@ -1161,6 +1166,47 @@ int main(int argc, char *argv[]) {
           RCLCPP_INFO(node->get_logger(),
                       "Cached teleop following subscriber: %s",
                       following_topic.c_str());
+        }
+
+        if (scale_subscribers_cache->find(teleop_name) ==
+            scale_subscribers_cache->end()) {
+          const std::string scale_topic = "/" + teleop_name + "/scale";
+
+          auto scale_sub = node->create_subscription<std_msgs::msg::Float64>(
+              scale_topic, latch_qos,
+              [overlay_state, active_teleops, teleop_name](
+                  const std_msgs::msg::Float64::SharedPtr scale_msg) {
+                if (active_teleops->find(teleop_name) ==
+                    active_teleops->end()) {
+                  return;
+                }
+                sv::on_teleop_scale(teleop_name, scale_msg, overlay_state);
+              });
+
+          (*scale_subscribers_cache)[teleop_name] = scale_sub;
+          RCLCPP_INFO(node->get_logger(), "Cached teleop scale subscriber: %s",
+                      scale_topic.c_str());
+        }
+
+        if (state_subscribers_cache->find(teleop_name) ==
+            state_subscribers_cache->end()) {
+          const std::string state_topic = "/" + teleop_name + "/current_state";
+
+          auto state_sub = node->create_subscription<std_msgs::msg::String>(
+              state_topic, latch_qos,
+              [overlay_state, active_teleops, teleop_name](
+                  const std_msgs::msg::String::SharedPtr state_msg) {
+                if (active_teleops->find(teleop_name) ==
+                    active_teleops->end()) {
+                  return;
+                }
+                sv::on_teleop_current_state(teleop_name, state_msg,
+                                            overlay_state);
+              });
+
+          (*state_subscribers_cache)[teleop_name] = state_sub;
+          RCLCPP_INFO(node->get_logger(), "Cached teleop state subscriber: %s",
+                      state_topic.c_str());
         }
 
         if (!arm_name.empty() &&

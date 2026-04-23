@@ -171,6 +171,43 @@ void draw_tool_type_label(
     cairo_show_text(cr, display_tool_type.c_str());
 }
 
+void draw_scale_label(
+    cairo_t* cr,
+    const double scale,
+    const std::string& state,
+    const bool left_side,
+    const double cx,
+    const double cy,
+    const double radius,
+    const double alpha
+) {
+    std::string label = std::to_string(static_cast<int>(std::round(scale * 100.0))) + "%";
+    if (state == "DISABLED") {
+        label += " disabled";
+    } else if (state == "ALIGNING_MTM") {
+        label = "Aligning...";
+    } else if (state == "SETTING_ARMS_STATE") {
+        label = "Checking arms";
+    }
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, radius * 0.75);
+
+    cairo_text_extents_t extents;
+    cairo_text_extents(cr, label.c_str(), &extents);
+
+    constexpr double k_label_gap = 12.0;
+    constexpr double k_label_upper_offset = -0.75;
+    const double text_x = left_side
+        ? (cx + radius + k_label_gap)
+        : (cx - radius - k_label_gap - extents.width - extents.x_bearing);
+    const double text_y = cy + radius * k_label_upper_offset - (extents.height / 2.0 + extents.y_bearing);
+
+    cairo_move_to(cr, text_x, text_y);
+    cairo_set_source_rgba(cr, 0.95, 0.95, 0.95, alpha);
+    cairo_show_text(cr, label.c_str());
+}
+
 void draw_camera_icon(
     cairo_t* cr,
     const bool active,
@@ -455,6 +492,38 @@ void on_teleop_following(
     indicator.psm_number = psm_number;
     indicator.is_camera_teleop = is_camera_teleop;
     indicator.following_active = msg->data;
+}
+
+void on_teleop_scale(
+    const std::string& teleop_name,
+    const std_msgs::msg::Float64::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+) {
+    if (msg == nullptr) {
+        return;
+    }
+
+    std::scoped_lock<std::mutex> lock(overlay_state->mutex);
+    auto it = overlay_state->teleop_indicators.find(teleop_name);
+    if (it != overlay_state->teleop_indicators.end()) {
+        it->second.scale = msg->data;
+    }
+}
+
+void on_teleop_current_state(
+    const std::string& teleop_name,
+    const std_msgs::msg::String::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+) {
+    if (msg == nullptr) {
+        return;
+    }
+
+    std::scoped_lock<std::mutex> lock(overlay_state->mutex);
+    auto it = overlay_state->teleop_indicators.find(teleop_name);
+    if (it != overlay_state->teleop_indicators.end()) {
+        it->second.current_state = msg->data;
+    }
 }
 
 void on_teleop_measured_cp(
@@ -751,6 +820,17 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
                     overlay_alpha
                 );
             }
+
+            draw_scale_label(
+                cr,
+                teleops[index].scale,
+                teleops[index].current_state,
+                label_on_right,
+                x,
+                psm_y,
+                psm_radius,
+                overlay_alpha
+            );
         }
     };
 
