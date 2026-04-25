@@ -7,7 +7,6 @@
 #include <cmath>
 #include <limits>
 #include <iomanip>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -368,16 +367,34 @@ bool parse_teleop_name(
     std::string* arm_name,
     bool* is_camera_teleop
 ) {
-    static const std::regex psm_teleop_regex(R"(^([A-Z0-9]+)_PSM([0-9]+)$)");
-    static const std::regex ecm_teleop_regex(R"(^([A-Z0-9_]+)_ECM$)");
-
     if (is_camera_teleop != nullptr) {
         *is_camera_teleop = false;
     }
 
-    std::smatch match;
-    if (std::regex_match(teleop_name, match, psm_teleop_regex)) {
-        mtm_name = match[1].str();
+    const std::string ecm_suffix = "_ECM";
+    if (teleop_name.size() > ecm_suffix.size() &&
+        teleop_name.compare(teleop_name.size() - ecm_suffix.size(), ecm_suffix.size(), ecm_suffix) == 0) {
+        mtm_name = teleop_name.substr(0, teleop_name.size() - ecm_suffix.size());
+        if (mtm_name == "MTMR_MTML") {
+            side = TeleopSide::Right;
+        } else if (mtm_name == "MTML_MTMR") {
+            side = TeleopSide::Left;
+        } else {
+            return false;
+        }
+        psm_number = 0;
+        if (arm_name != nullptr) {
+            *arm_name = "ECM";
+        }
+        if (is_camera_teleop != nullptr) {
+            *is_camera_teleop = true;
+        }
+        return true;
+    }
+
+    auto psm_pos = teleop_name.find("_PSM");
+    if (psm_pos != std::string::npos && psm_pos > 0) {
+        mtm_name = teleop_name.substr(0, psm_pos);
         if (mtm_name.rfind("MTML", 0) == 0) {
             side = TeleopSide::Left;
         } else if (mtm_name.rfind("MTMR", 0) == 0) {
@@ -386,8 +403,17 @@ bool parse_teleop_name(
             return false;
         }
 
+        std::string psm_num_str = teleop_name.substr(psm_pos + 4);
+        if (psm_num_str.empty()) {
+            return false;
+        }
+        for (char c : psm_num_str) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) {
+                return false;
+            }
+        }
         try {
-            psm_number = std::stoi(match[2].str());
+            psm_number = std::stoi(psm_num_str);
         } catch (...) {
             return false;
         }
@@ -401,38 +427,23 @@ bool parse_teleop_name(
         return true;
     }
 
-    if (!std::regex_match(teleop_name, match, ecm_teleop_regex)) {
-        return false;
-    }
-
-    mtm_name = match[1].str();
-    if (mtm_name == "MTMR_MTML") {
-        side = TeleopSide::Right;
-    } else if (mtm_name == "MTML_MTMR") {
-        side = TeleopSide::Left;
-    } else {
-        return false;
-    }
-
-    psm_number = 0;
-    if (arm_name != nullptr) {
-        *arm_name = "ECM";
-    }
-    if (is_camera_teleop != nullptr) {
-        *is_camera_teleop = true;
-    }
-    return true;
+    return false;
 }
 
 bool parse_psm_name(const std::string& psm_name, int& psm_number) {
-    static const std::regex psm_regex(R"(^PSM([0-9]+)$)");
-    std::smatch match;
-    if (!std::regex_match(psm_name, match, psm_regex)) {
+    if (psm_name.rfind("PSM", 0) != 0 || psm_name.size() <= 3) {
         return false;
     }
 
+    std::string num_str = psm_name.substr(3);
+    for (char c : num_str) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+
     try {
-        psm_number = std::stoi(match[1].str());
+        psm_number = std::stoi(num_str);
     } catch (...) {
         return false;
     }
@@ -445,13 +456,18 @@ std::string format_tool_type_label(const std::string& raw_tool_type) {
         return "";
     }
 
-    static const std::regex prefix_regex(R"(^([^:]+):?.*$)");
-    std::smatch match;
-    if (!std::regex_match(raw_tool_type, match, prefix_regex)) {
+    auto colon_pos = raw_tool_type.find(':');
+    std::string formatted;
+    if (colon_pos != std::string::npos) {
+        formatted = raw_tool_type.substr(0, colon_pos);
+    } else {
+        formatted = raw_tool_type;
+    }
+
+    if (formatted.empty()) {
         return "";
     }
 
-    std::string formatted = match[1].str();
     std::replace(formatted.begin(), formatted.end(), '_', ' ');
 
     bool capitalize_next = true;
