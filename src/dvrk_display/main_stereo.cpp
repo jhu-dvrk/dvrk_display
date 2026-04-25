@@ -796,6 +796,7 @@ public:
           win->add(*mm_widget);
           win->show_all();
           m_display_windows.push_back(std::make_pair(name, std::move(win)));
+          g_object_unref(gtk_widget);
         }
         gst_object_unref(sink);
       }
