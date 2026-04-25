@@ -879,7 +879,14 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  const sv::AppConfig cfg = sv::Config::parse_app_config(root);
+  sv::AppConfig cfg;
+  try {
+    cfg = sv::Config::parse_app_config(root);
+  } catch (const std::exception &e) {
+    RCLCPP_ERROR(node->get_logger(), "%s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
 
   if (cfg.sinks.empty()) {
     RCLCPP_WARN(node->get_logger(), "Config '%s' has an empty sinks list",

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 
 namespace sv {
 
@@ -119,9 +120,20 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     }
     if (root.isMember("left_stream")) {
         cfg.left.source = root["left_stream"].asString();
+        if (cfg.left.source.empty()) {
+            throw std::runtime_error("Configuration error: 'left_stream' is present but empty.");
+        }
+    } else {
+        throw std::runtime_error("Configuration error: Required field 'left_stream' is missing.");
     }
+
     if (root.isMember("right_stream")) {
         cfg.right.source = root["right_stream"].asString();
+        if (cfg.right.source.empty()) {
+            throw std::runtime_error("Configuration error: 'right_stream' is present but empty.");
+        }
+    } else {
+        throw std::runtime_error("Configuration error: Required field 'right_stream' is missing.");
     }
 
     if (cfg.crop_width <= 0) {
