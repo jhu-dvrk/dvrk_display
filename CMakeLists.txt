@@ -14,6 +14,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(data_collection REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
 
@@ -52,6 +53,7 @@ ament_target_dependencies(stereo
   sensor_msgs
   std_msgs
   image_transport
+  data_collection
 )
 target_include_directories(stereo PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common

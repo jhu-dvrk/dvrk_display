@@ -6,7 +6,9 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <iomanip>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -91,6 +93,42 @@ void draw_status_circle(cairo_t* cr, const int status, const double cx, const do
     }
 }
 
+void draw_scale_gage(
+    cairo_t* cr,
+    const double scale,
+    const bool on_right,
+    const double cx,
+    const double cy,
+    const double radius,
+    const double alpha
+) {
+    const double gage_height = radius * 2.0;
+    const double gage_width = gage_height / 3.0;
+    constexpr double k_gage_gap = 4.0;
+
+    const double x = on_right
+        ? (cx + radius + k_gage_gap)
+        : (cx - radius - k_gage_gap - gage_width);
+    const double y = cy - radius;
+
+    // Background
+    cairo_new_path(cr);
+    cairo_rectangle(cr, x, y, gage_width, gage_height);
+    cairo_set_source_rgba(cr, 0.15, 0.15, 0.15, alpha * 0.8);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, alpha);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
+
+    // Fill
+    const double clamped_scale = std::max(0.0, std::min(1.0, scale));
+    const double fill_height = gage_height * clamped_scale;
+    cairo_new_path(cr);
+    cairo_rectangle(cr, x, y + gage_height - fill_height, gage_width, fill_height);
+    cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, alpha);
+    cairo_fill(cr);
+}
+
 void draw_numbered_circle(
     cairo_t* cr,
     const bool active,
@@ -146,7 +184,8 @@ void draw_tool_type_label(
     const double cx,
     const double cy,
     const double radius,
-    const double alpha
+    const double alpha,
+    const double extra_offset = 0.0
 ) {
     const std::string display_tool_type = format_tool_type_label(tool_type);
     if (display_tool_type.empty()) {
@@ -162,8 +201,8 @@ void draw_tool_type_label(
     constexpr double k_label_gap = 12.0;
     constexpr double k_label_lower_offset = 0.75;
     const double text_x = left_side
-        ? (cx + radius + k_label_gap)
-        : (cx - radius - k_label_gap - extents.width - extents.x_bearing);
+        ? (cx + radius + k_label_gap + extra_offset)
+        : (cx - radius - k_label_gap - extents.width - extents.x_bearing - extra_offset);
     const double text_y = cy + radius * k_label_lower_offset - (extents.height / 2.0 + extents.y_bearing);
 
     cairo_move_to(cr, text_x, text_y);
@@ -173,21 +212,25 @@ void draw_tool_type_label(
 
 void draw_scale_label(
     cairo_t* cr,
-    const double scale,
     const std::string& state,
     const bool left_side,
     const double cx,
     const double cy,
     const double radius,
-    const double alpha
+    const double alpha,
+    const double extra_offset = 0.0
 ) {
-    std::string label = std::to_string(static_cast<int>(std::round(scale * 100.0))) + "%";
+    std::string label = "";
     if (state == "DISABLED") {
-        label += " disabled";
+        label = "disabled";
     } else if (state == "ALIGNING_MTM") {
         label = "Aligning...";
     } else if (state == "SETTING_ARMS_STATE") {
         label = "Checking arms";
+    }
+
+    if (label.empty()) {
+        return;
     }
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
@@ -196,11 +239,11 @@ void draw_scale_label(
     cairo_text_extents_t extents;
     cairo_text_extents(cr, label.c_str(), &extents);
 
-    constexpr double k_label_gap = 12.0;
+    constexpr double k_label_gap = 6.0;
     constexpr double k_label_upper_offset = -0.75;
     const double text_x = left_side
-        ? (cx + radius + k_label_gap)
-        : (cx - radius - k_label_gap - extents.width - extents.x_bearing);
+        ? (cx + radius + k_label_gap + extra_offset)
+        : (cx - radius - k_label_gap - extents.width - extents.x_bearing - extra_offset);
     const double text_y = cy + radius * k_label_upper_offset - (extents.height / 2.0 + extents.y_bearing);
 
     cairo_move_to(cr, text_x, text_y);
@@ -686,7 +729,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
     constexpr double k_status_spacing_ratio = 15.0 / 425.0;
     constexpr double k_overlay_margin_ratio = 12.0 / 425.0;
     constexpr double k_psm_radius_ratio = 7.0 / 425.0;
-    constexpr double k_psm_x_margin_ratio = 55.0 / 425.0;
+    constexpr double k_psm_x_margin_ratio = 30.0 / 425.0;
     constexpr double k_psm_y_step_ratio = 20.0 / 425.0;
 
     const double radius = image_scale * k_status_radius_ratio;
@@ -762,7 +805,7 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
             const double bg_padding_x = psm_radius * 0.8;
             const double bg_padding_bottom = psm_radius * 0.6;
             
-            cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.5);
+            cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.2);
             cairo_rectangle(cr, 
                 bg_x_left - bg_padding_x, 
                 0, 
@@ -808,6 +851,19 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
                 overlay_alpha
             );
 
+            draw_scale_gage(
+                cr,
+                teleops[index].scale,
+                label_on_right,
+                x,
+                psm_y,
+                psm_radius,
+                overlay_alpha
+            );
+
+            const double gage_width = (psm_radius * 2.0) / 3.0;
+            const double extra_offset = 4.0 + gage_width;
+
             const auto info_it = arm_info.find(teleops[index].arm_name);
             if (info_it != arm_info.end()) {
                 draw_tool_type_label(
@@ -817,19 +873,20 @@ void on_overlay_draw(GstElement* overlay, cairo_t* cr, guint64, guint64, gpointe
                     x,
                     psm_y,
                     psm_radius,
-                    overlay_alpha
+                    overlay_alpha,
+                    extra_offset
                 );
             }
 
             draw_scale_label(
                 cr,
-                teleops[index].scale,
                 teleops[index].current_state,
                 label_on_right,
                 x,
                 psm_y,
                 psm_radius,
-                overlay_alpha
+                overlay_alpha,
+                extra_offset
             );
         }
     };

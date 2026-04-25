@@ -34,6 +34,7 @@
 
 #include "config.hpp"
 #include "overlay.hpp"
+#include <data_collection/cpu_timestamp_meta.hpp>
 
 namespace {
 
@@ -58,66 +59,6 @@ struct RosImagePublisherContext {
 };
 
 static Glib::RefPtr<Gtk::Application> g_app;
-static rclcpp::Publisher<std_msgs::msg::Header>::SharedPtr
-    g_timestamp_pub = nullptr;
-static std::atomic<std::uint64_t> g_unixfd_offset_counter{0};
-
-typedef struct _CpuTimestampMeta {
-  GstMeta meta;
-  gint64 cpu_timestamp_ns;
-} CpuTimestampMeta;
-
-GType cpu_timestamp_meta_api_get_type(void) {
-  static GType type = 0;
-  static const gchar *tags[] = {"cpu_timestamp", nullptr};
-  if (g_once_init_enter(&type)) {
-    GType new_type = gst_meta_api_type_register("CpuTimestampMetaAPI", tags);
-    g_once_init_leave(&type, new_type);
-  }
-  return type;
-}
-
-const GstMetaInfo *cpu_timestamp_meta_get_info(void) {
-  static const GstMetaInfo *meta_info = nullptr;
-  if (g_once_init_enter(&meta_info)) {
-    const GstMetaInfo *new_meta_info = gst_meta_register(
-        cpu_timestamp_meta_api_get_type(), "CpuTimestampMeta",
-        sizeof(CpuTimestampMeta),
-        [](GstMeta *meta, gpointer, GstBuffer *) -> gboolean {
-          reinterpret_cast<CpuTimestampMeta *>(meta)->cpu_timestamp_ns = 0;
-          return TRUE;
-        },
-        [](GstMeta *, GstBuffer *) -> void {},
-        [](GstBuffer *dest, GstMeta *meta, GstBuffer *, GQuark,
-           gpointer) -> gboolean {
-          const auto *src_meta = reinterpret_cast<CpuTimestampMeta *>(meta);
-          auto *dest_meta = reinterpret_cast<CpuTimestampMeta *>(
-              gst_buffer_add_meta(dest, cpu_timestamp_meta_get_info(), nullptr));
-          if (dest_meta == nullptr) {
-            return FALSE;
-          }
-          dest_meta->cpu_timestamp_ns = src_meta->cpu_timestamp_ns;
-          return TRUE;
-        });
-    g_once_init_leave(&meta_info, new_meta_info);
-  }
-  return meta_info;
-}
-
-CpuTimestampMeta *gst_buffer_add_cpu_timestamp_meta(GstBuffer *buffer,
-                                                    gint64 cpu_timestamp_ns) {
-  auto *meta = reinterpret_cast<CpuTimestampMeta *>(
-      gst_buffer_add_meta(buffer, cpu_timestamp_meta_get_info(), nullptr));
-  if (meta != nullptr) {
-    meta->cpu_timestamp_ns = cpu_timestamp_ns;
-  }
-  return meta;
-}
-
-CpuTimestampMeta *gst_buffer_get_cpu_timestamp_meta(GstBuffer *buffer) {
-  return reinterpret_cast<CpuTimestampMeta *>(
-      gst_buffer_get_meta(buffer, cpu_timestamp_meta_api_get_type()));
-}
 
 int clip_int(const int value, const int min_value, const int max_value) {
   return std::max(min_value, std::min(max_value, value));
@@ -523,28 +464,8 @@ GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
       GST_PAD_PROBE_INFO_DATA(info) = buf;
     }
 
-    long long cpu_timestamp = 0;
-    if (auto *meta = gst_buffer_get_cpu_timestamp_meta(buf)) {
-      cpu_timestamp = meta->cpu_timestamp_ns;
-    }
-    if (cpu_timestamp == 0) {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      cpu_timestamp =
-          static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-      gst_buffer_add_cpu_timestamp_meta(buf, cpu_timestamp);
-    }
-
-    const std::uint64_t remote_offset = g_unixfd_offset_counter.fetch_add(1);
-    GST_BUFFER_OFFSET(buf) = remote_offset;
-    GST_BUFFER_OFFSET_END(buf) = remote_offset + 1;
-
-    if (g_timestamp_pub) {
-      auto msg = std_msgs::msg::Header();
-      msg.stamp.sec = static_cast<int32_t>((remote_offset >> 32) & 0xffffffffULL);
-      msg.stamp.nanosec = static_cast<uint32_t>(remote_offset & 0xffffffffULL);
-      msg.frame_id = std::to_string(cpu_timestamp);
-      g_timestamp_pub->publish(msg);
+    if (!gst_buffer_get_custom_meta(buf, DC_CPU_TIMESTAMP_META_NAME)) {
+      dc_buffer_add_cpu_timestamp(buf, dc_clock_realtime_ns());
     }
   }
   return GST_PAD_PROBE_OK;
@@ -829,6 +750,10 @@ public:
     m_btn_fullscreen.signal_toggled().connect(sigc::mem_fun(*this, &ControlWindow::on_fullscreen_toggled));
     m_vbox.pack_start(m_btn_fullscreen);
 
+    m_btn_quit.set_label("Quit");
+    m_btn_quit.signal_clicked().connect(sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
+    m_vbox.pack_start(m_btn_quit);
+
     show_all_children();
 
     const std::vector<std::string> sink_names = {"__left_eye_sink__", "__right_eye_sink__", "__stereo_sink__"};
@@ -865,11 +790,18 @@ protected:
     }
   }
 
+  void on_quit_clicked() {
+    if (g_app) {
+      g_app->quit();
+    }
+  }
+
   std::shared_ptr<sv::OverlayState> m_overlay_state;
   GstElement* m_pipeline;
   Gtk::Box m_vbox;
   Gtk::ToggleButton m_btn_overlay;
   Gtk::ToggleButton m_btn_fullscreen;
+  Gtk::Button m_btn_quit;
   std::vector<std::pair<std::string, std::unique_ptr<Gtk::Window>>> m_display_windows;
 };
 
@@ -985,9 +917,6 @@ int main(int argc, char *argv[]) {
   warn_if_interlaced_stream(app_cfg.left.source, node->get_logger(), "left");
   warn_if_interlaced_stream(app_cfg.right.source, node->get_logger(), "right");
 
-  // Initialize timestamp publisher with reliable QoS
-  g_timestamp_pub = node->create_publisher<std_msgs::msg::Header>(
-      app_cfg.name + "/unixfd_timestamps", rclcpp::QoS(100).reliable());
 
   if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
       app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
@@ -1383,18 +1312,25 @@ int main(int argc, char *argv[]) {
 
   ControlWindow window(overlay_state, pipeline);
 
-  gst_element_set_state(pipeline, GST_STATE_PLAYING);
-  RCLCPP_INFO(node->get_logger(), "Stereo display pipeline started");
-
   if (app_cfg.has_unixfd_socket_path) {
     const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
     if (std::filesystem::exists(unixfd_socket_path)) {
       RCLCPP_INFO(node->get_logger(),
-                  "Removing stale unixfd socket: %s",
+                  "Removing stale unixfd socket before starting pipeline: %s",
                   unixfd_socket_path.c_str());
-      std::filesystem::remove(unixfd_socket_path);
+      std::error_code remove_error;
+      if (!std::filesystem::remove(unixfd_socket_path, remove_error) &&
+          remove_error) {
+        RCLCPP_WARN(node->get_logger(),
+                    "Unable to remove stale unixfd socket '%s': %s",
+                    unixfd_socket_path.c_str(),
+                    remove_error.message().c_str());
+      }
     }
   }
+
+  gst_element_set_state(pipeline, GST_STATE_PLAYING);
+  RCLCPP_INFO(node->get_logger(), "Stereo display pipeline started");
 
   g_app->run(window);
 
@@ -1407,7 +1343,6 @@ int main(int argc, char *argv[]) {
 
   g_app.reset();
 
-  g_timestamp_pub.reset();
 
   rclcpp::shutdown();
   return 0;
