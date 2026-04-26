@@ -47,6 +47,8 @@ ament_target_dependencies(dvrk_display
 add_executable(stereo
   src/dvrk_display/main_stereo.cpp
   src/dvrk_display/overlay.cpp
+  src/dvrk_display/overlay_utils.cpp
+  src/dvrk_display/overlay_components.cpp
 )
 ament_target_dependencies(stereo
   rclcpp
