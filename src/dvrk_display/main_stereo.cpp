@@ -1061,6 +1061,12 @@ int main(int argc, char *argv[]) {
       [overlay_state](const sensor_msgs::msg::Joy::SharedPtr msg) {
         sv::on_operator_present(msg, overlay_state);
       });
+ 
+  auto ecm_js_sub = node->create_subscription<sensor_msgs::msg::JointState>(
+      "/ECM/measured_js", measured_cp_qos,
+      [overlay_state](const sensor_msgs::msg::JointState::SharedPtr msg) {
+        sv::on_ecm_measured_js(msg, overlay_state);
+      });
 
   auto following_subscribers_cache = std::make_shared<std::unordered_map<
       std::string, rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr>>();
@@ -1349,6 +1355,7 @@ int main(int argc, char *argv[]) {
   (void)operator_present_sub;
   (void)teleop_selected_sub;
   (void)teleop_unselected_sub;
+  (void)ecm_js_sub;
 
   ControlWindow window(overlay_state, pipeline);
 

@@ -8,6 +8,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 #include <unordered_map>
 #include <memory>
@@ -63,6 +64,7 @@ struct OverlayState {
     bool overlay_enabled = true;
     double overlay_alpha = 0.7;
     int display_horizontal_offset_px = 0;
+    double camera_roll = 0.0;
     std::unordered_map<std::string, TeleopIndicator> teleop_indicators;
     std::unordered_map<std::string, ArmOverlayInfo> arm_info;
     std::mutex mutex;
@@ -127,6 +129,10 @@ void on_clutch_joy(
 
 void on_operator_present(
     const sensor_msgs::msg::Joy::SharedPtr msg,
+    const std::shared_ptr<OverlayState>& overlay_state
+);
+void on_ecm_measured_js(
+    const sensor_msgs::msg::JointState::SharedPtr msg,
     const std::shared_ptr<OverlayState>& overlay_state
 );
 

@@ -162,7 +162,8 @@ void draw_scale_label(cairo_t *cr, const std::string &state, bool left_side,
 }
 
 void draw_camera_icon(cairo_t *cr, bool active, bool valid, double cx, double cy,
-                      double radius, double alpha, const OverlayTheme &theme) {
+                      double radius, double alpha, double roll,
+                      const OverlayTheme &theme) {
   const RgbaColor outline_color =
       valid ? theme.valid_grey : theme.invalid_red;
 
@@ -200,11 +201,23 @@ void draw_camera_icon(cairo_t *cr, bool active, bool valid, double cx, double cy
   cairo_set_line_width(cr, theme.line_width);
   cairo_stroke(cr);
 
+  const double circle_radius = body_height * 0.45;
   cairo_new_path(cr);
-  cairo_arc(cr, cx, cy, body_height * 0.45, 0.0, 2.0 * M_PI);
+  cairo_arc(cr, cx, cy, circle_radius, 0.0, 2.0 * M_PI);
   set_source_rgba(cr, outline_color, alpha);
   cairo_set_line_width(cr, theme.line_width);
   cairo_stroke(cr);
+
+  // Draw horizon bar inside the circle
+  cairo_save(cr);
+  cairo_translate(cr, cx, cy);
+  cairo_rotate(cr, -roll); // Negative because if camera rolls right, horizon tilts left
+  cairo_move_to(cr, -circle_radius * 0.8, 0);
+  cairo_line_to(cr, circle_radius * 0.8, 0);
+  set_source_rgba(cr, outline_color, alpha);
+  cairo_set_line_width(cr, theme.line_width);
+  cairo_stroke(cr);
+  cairo_restore(cr);
 }
 
 void draw_operator_present_icon(cairo_t *cr, int status, double cx, double cy,

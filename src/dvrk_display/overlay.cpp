@@ -295,6 +295,18 @@ void on_operator_present(const sensor_msgs::msg::Joy::SharedPtr msg,
   update_button_state(msg, overlay_state->operator_present);
 }
 
+void on_ecm_measured_js(const sensor_msgs::msg::JointState::SharedPtr msg,
+                        const std::shared_ptr<OverlayState> &overlay_state) {
+  if (msg == nullptr) {
+    return;
+  }
+  if (msg->position.size() < 4) {
+    return;
+  }
+  std::scoped_lock<std::mutex> lock(overlay_state->mutex);
+  overlay_state->camera_roll = msg->position[3];
+}
+
 void on_overlay_caps_changed(GstElement *, GstCaps *caps, gpointer user_data) {
   if (caps == nullptr || user_data == nullptr) {
     return;
@@ -326,6 +338,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
   int frame_height = 0;
   double overlay_alpha = 0.7;
   int display_horizontal_offset_px = 0;
+  double camera_roll = 0.0;
   std::unordered_map<std::string, ArmOverlayInfo> arm_info;
   std::vector<TeleopIndicator> left_teleops;
   std::vector<TeleopIndicator> right_teleops;
@@ -349,6 +362,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
     frame_height = overlay_state->frame_height;
     overlay_alpha = overlay_state->overlay_alpha;
     display_horizontal_offset_px = overlay_state->display_horizontal_offset_px;
+    camera_roll = overlay_state->camera_roll;
     arm_info = overlay_state->arm_info;
 
     for (const auto &pair : overlay_state->teleop_indicators) {
@@ -486,13 +500,14 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
                                    cy_top, theme.radius, overlay_alpha, theme);
         draw_camera_icon(cr, camera_teleop.following_active, camera_valid,
                          cx + top_offset, cy_top, theme.radius, overlay_alpha,
-                         theme);
+                         camera_roll, theme);
       } else if (show_op) {
         draw_operator_present_icon(cr, operator_present_status, cx, cy_top,
                                    theme.radius, overlay_alpha, theme);
       } else if (show_cam) {
         draw_camera_icon(cr, camera_teleop.following_active, camera_valid, cx,
-                         cy_top, theme.radius, overlay_alpha, theme);
+                         cy_top, theme.radius, overlay_alpha, camera_roll,
+                         theme);
       }
     };
 
