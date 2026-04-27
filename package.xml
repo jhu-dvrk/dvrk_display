@@ -9,7 +9,6 @@
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <depend>image_transport</depend>
   <depend>data_collection</depend>
   <depend>ament_index_cpp</depend>
 
@@ -30,6 +29,8 @@
   <exec_depend>libjsoncpp-dev</exec_depend>
   <exec_depend>libcairo2</exec_depend>
   <exec_depend>libgtkmm-3.0-dev</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>gscam</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

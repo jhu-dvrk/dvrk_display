@@ -3,15 +3,10 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
-#include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/image_encodings.hpp>
-#include <sensor_msgs/msg/camera_info.hpp>
-#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
-#include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <gst/video/navigation.h>
@@ -47,15 +42,6 @@ struct CropValues {
   int right = 0;
   int top = 0;
   int bottom = 0;
-};
-
-enum class RosImageTarget { Left, Right, Stereo };
-
-struct RosImagePublisherContext {
-  RosImageTarget target = RosImageTarget::Stereo;
-  std::string topic_base;
-  std::string frame_id;
-  image_transport::CameraPublisher publisher;
 };
 
 static Glib::RefPtr<Gtk::Application> g_app;
@@ -269,13 +255,10 @@ void warn_if_interlaced_stream(const std::string &stream,
   gst_object_unref(pipeline);
 }
 
-std::string resolve_unixfd_socket_path(const sv::AppConfig &stereo) {
-  if (!stereo.has_unixfd_socket_path) {
-    return "";
-  }
-
-  if (!stereo.unixfd_socket_path.empty()) {
-    return stereo.unixfd_socket_path;
+std::string resolve_unixfd_socket_path(const std::string &viewer_name,
+                                      const sv::UnixfdSinkConfig &sink) {
+  if (!sink.socket_path.empty()) {
+    return sink.socket_path;
   }
 
   const char *username = getenv("USER");
@@ -283,7 +266,14 @@ std::string resolve_unixfd_socket_path(const sv::AppConfig &stereo) {
     struct passwd *pw = getpwuid(getuid());
     username = pw ? pw->pw_name : "unknown";
   }
-  return "/tmp/" + stereo.name + "_" + std::string(username) + ".sock";
+
+  std::string suffix = sink.name;
+  if (suffix.empty()) {
+    suffix = sink.stream;
+  }
+
+  return "/tmp/" + viewer_name + "_" + suffix + "_" + std::string(username) +
+         ".sock";
 }
 
 bool check_element_available(const std::string &element_name) {
@@ -297,160 +287,6 @@ bool check_element_available(const std::string &element_name) {
 
 std::string get_unixfd_upload_chain() {
   return "gldownload ! videoconvert ! video/x-raw,format=I420";
-}
-
-std::string to_lower(std::string value) {
-  std::transform(
-      value.begin(), value.end(), value.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return value;
-}
-
-std::string trim_topic_tokens(std::string value) {
-  while (!value.empty() && value.front() == '/') {
-    value.erase(value.begin());
-  }
-  while (!value.empty() && value.back() == '/') {
-    value.pop_back();
-  }
-  return value;
-}
-
-bool parse_ros_image_target(const std::string &value, RosImageTarget &target) {
-  const std::string normalized = to_lower(value);
-  if (normalized == "left") {
-    target = RosImageTarget::Left;
-    return true;
-  }
-  if (normalized == "right") {
-    target = RosImageTarget::Right;
-    return true;
-  }
-  if (normalized == "stereo") {
-    target = RosImageTarget::Stereo;
-    return true;
-  }
-  return false;
-}
-
-std::string ros_image_target_name(const RosImageTarget target) {
-  switch (target) {
-  case RosImageTarget::Left:
-    return "left";
-  case RosImageTarget::Right:
-    return "right";
-  case RosImageTarget::Stereo:
-    return "stereo";
-  }
-  return "stereo";
-}
-
-std::string ros_sink_name(const RosImageTarget target) {
-  switch (target) {
-  case RosImageTarget::Left:
-    return "__ros_left_sink__";
-  case RosImageTarget::Right:
-    return "__ros_right_sink__";
-  case RosImageTarget::Stereo:
-    return "__ros_stereo_sink__";
-  }
-  return "__ros_stereo_sink__";
-}
-
-bool has_ros_target(const std::vector<RosImageTarget> &targets,
-                    const RosImageTarget target) {
-  return std::find(targets.begin(), targets.end(), target) != targets.end();
-}
-
-bool parse_ros_image_publishers(const std::vector<std::string> &values,
-                                const rclcpp::Logger &logger,
-                                std::vector<RosImageTarget> &targets) {
-  targets.clear();
-  for (const auto &value : values) {
-    RosImageTarget target;
-    if (!parse_ros_image_target(value, target)) {
-      RCLCPP_ERROR(logger,
-                   "Invalid ros_image_publishers entry '%s'. Allowed values "
-                   "are: left, right, stereo",
-                   value.c_str());
-      return false;
-    }
-    if (!has_ros_target(targets, target)) {
-      targets.push_back(target);
-    }
-  }
-  return true;
-}
-
-GstFlowReturn on_new_ros_image_sample(GstElement *sink, gpointer user_data) {
-  auto *publisher_context = static_cast<RosImagePublisherContext *>(user_data);
-  if (publisher_context == nullptr) {
-    return GST_FLOW_OK;
-  }
-
-  GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
-  if (sample == nullptr) {
-    return GST_FLOW_OK;
-  }
-
-  GstBuffer *buffer = gst_sample_get_buffer(sample);
-  GstCaps *caps = gst_sample_get_caps(sample);
-  GstVideoInfo video_info;
-
-  if (buffer != nullptr && caps != nullptr &&
-      gst_video_info_from_caps(&video_info, caps)) {
-    GstVideoFrame frame;
-    if (gst_video_frame_map(&frame, &video_info, buffer, GST_MAP_READ)) {
-      auto image_msg = std::make_shared<sensor_msgs::msg::Image>();
-      auto camera_info_msg = std::make_shared<sensor_msgs::msg::CameraInfo>();
-
-      struct timespec current_time;
-      clock_gettime(CLOCK_REALTIME, &current_time);
-      image_msg->header.stamp.sec = current_time.tv_sec;
-      image_msg->header.stamp.nanosec = current_time.tv_nsec;
-      image_msg->header.frame_id = publisher_context->frame_id;
-
-      image_msg->height = GST_VIDEO_INFO_HEIGHT(&video_info);
-      image_msg->width = GST_VIDEO_INFO_WIDTH(&video_info);
-      image_msg->encoding = sensor_msgs::image_encodings::RGB8;
-      image_msg->is_bigendian = 0;
-      image_msg->step = image_msg->width * 3;
-
-      const size_t image_size = image_msg->step * image_msg->height;
-      image_msg->data.resize(image_size);
-
-      const uint8_t *src =
-          static_cast<uint8_t *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
-      const int src_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
-      uint8_t *dst = image_msg->data.data();
-
-      if (static_cast<int>(image_msg->step) == src_stride) {
-        std::memcpy(dst, src, image_size);
-      } else {
-        for (uint32_t row = 0; row < image_msg->height; ++row) {
-          std::memcpy(dst + row * image_msg->step, src + row * src_stride,
-                      image_msg->step);
-        }
-      }
-
-      camera_info_msg->header = image_msg->header;
-      camera_info_msg->height = image_msg->height;
-      camera_info_msg->width = image_msg->width;
-      camera_info_msg->distortion_model = "plumb_bob";
-      camera_info_msg->d.resize(5, 0.0);
-      camera_info_msg->k[0] = image_msg->width;
-      camera_info_msg->k[2] = image_msg->width / 2.0;
-      camera_info_msg->k[4] = image_msg->width;
-      camera_info_msg->k[5] = image_msg->height / 2.0;
-      camera_info_msg->k[8] = 1.0;
-
-      publisher_context->publisher.publish(image_msg, camera_info_msg);
-      gst_video_frame_unmap(&frame);
-    }
-  }
-
-  gst_sample_unref(sample);
-  return GST_FLOW_OK;
 }
 
 GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
@@ -530,9 +366,7 @@ std::string color_adjustment_string(const sv::ColorAdjustment &color) {
 }
 
 std::string
-build_pipeline_string(const sv::AppConfig &stereo,
-                      const std::vector<RosImageTarget> &ros_targets,
-                      const bool include_overlay) {
+build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
   int base_crop_w =
       stereo.crop_width > 0 ? stereo.crop_width : stereo.original_width;
   int base_crop_h =
@@ -566,10 +400,6 @@ build_pipeline_string(const sv::AppConfig &stereo,
   const int eye_w = stereo.preserve_size ? stereo.original_width : base_crop_w;
   const int eye_h = stereo.preserve_size ? stereo.original_height : base_crop_h;
 
-  const bool publish_left = has_ros_target(ros_targets, RosImageTarget::Left);
-  const bool publish_right = has_ros_target(ros_targets, RosImageTarget::Right);
-  const bool publish_stereo =
-      has_ros_target(ros_targets, RosImageTarget::Stereo);
   const bool has_glimage = std::find(stereo.sinks.begin(), stereo.sinks.end(),
                                      "glimage") != stereo.sinks.end();
   const bool has_glimages = std::find(stereo.sinks.begin(), stereo.sinks.end(),
@@ -608,6 +438,13 @@ build_pipeline_string(const sv::AppConfig &stereo,
                    ",height=" + std::to_string(stereo.original_height);
   }
 
+  std::vector<sv::UnixfdSinkConfig> left_unixfd_sinks;
+  for (const auto &sink : stereo.unixfd_sinks) {
+    if (sink.stream == "left") {
+      left_unixfd_sinks.push_back(sink);
+    }
+  }
+
   std::string left_chain =
       stereo.left.source +
       " ! queue name=__left_src_q__ max-size-buffers=8 leaky=downstream " +
@@ -616,17 +453,13 @@ build_pipeline_string(const sv::AppConfig &stereo,
       " right=" + std::to_string(left_crop.right) +
       " top=" + std::to_string(left_crop.top) +
       " bottom=" + std::to_string(left_crop.bottom) + scale_suffix;
-  if (publish_left || has_glimages) {
+
+  const bool need_left_tee = has_glimages || !left_unixfd_sinks.empty();
+
+  if (need_left_tee) {
     left_chain += " ! tee name=__left_out__"
                   " __left_out__. ! queue max-size-buffers=1 leaky=downstream "
                   "! glupload ! mix.sink_0";
-    if (publish_left) {
-      left_chain += " __left_out__. ! queue max-size-buffers=2 max-size-time=0 "
-                    "max-size-bytes=0 leaky=downstream"
-                    " ! videoconvert ! video/x-raw,format=RGB"
-                    " ! appsink name=__ros_left_sink__ sync=false async=false "
-                    "emit-signals=true drop=true max-buffers=1";
-    }
     if (has_glimages) {
       left_chain +=
           " __left_out__. ! queue max-size-buffers=1 leaky=downstream";
@@ -637,8 +470,27 @@ build_pipeline_string(const sv::AppConfig &stereo,
           " ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__ "
           "sync=false force-aspect-ratio=false";
     }
+
+    for (const auto &sink : left_unixfd_sinks) {
+      const std::string socket_path =
+          resolve_unixfd_socket_path(stereo.name, sink);
+      left_chain += " __left_out__. ! queue max-size-buffers=2 "
+                    "max-size-time=0 max-size-bytes=0 leaky=downstream"
+                    " ! videoconvert ! video/x-raw,format=I420"
+                    " ! queue name=__unixfd_ts_q_left__ max-size-buffers=2 "
+                    "max-size-time=0 max-size-bytes=0 leaky=downstream"
+                    " ! unixfdsink socket-path=" +
+                    socket_path + " sync=true async=false";
+    }
   } else {
     left_chain += " ! glupload ! mix.sink_0";
+  }
+
+  std::vector<sv::UnixfdSinkConfig> right_unixfd_sinks;
+  for (const auto &sink : stereo.unixfd_sinks) {
+    if (sink.stream == "right") {
+      right_unixfd_sinks.push_back(sink);
+    }
   }
 
   std::string right_chain =
@@ -649,19 +501,13 @@ build_pipeline_string(const sv::AppConfig &stereo,
       " right=" + std::to_string(right_crop.right) +
       " top=" + std::to_string(right_crop.top) +
       " bottom=" + std::to_string(right_crop.bottom) + scale_suffix;
-  if (publish_right || has_glimages) {
+
+  const bool need_right_tee = has_glimages || !right_unixfd_sinks.empty();
+
+  if (need_right_tee) {
     right_chain += " ! tee name=__right_out__"
                    " __right_out__. ! queue max-size-buffers=1 "
                    "leaky=downstream ! glupload ! mix.sink_1";
-    if (publish_right) {
-      right_chain +=
-          " __right_out__. ! queue max-size-buffers=2 max-size-time=0 "
-          "max-size-bytes=0 leaky=downstream"
-          " ! videoconvert ! video/x-raw,format=RGB"
-          " ! appsink name=__ros_right_sink__ sync=false async=false "
-          "emit-signals=true drop=true max-buffers=1"; // videoconvert from
-                                                       // native YUV to RGB
-    }
     if (has_glimages) {
       right_chain +=
           " __right_out__. ! queue max-size-buffers=1 leaky=downstream";
@@ -671,6 +517,18 @@ build_pipeline_string(const sv::AppConfig &stereo,
       right_chain +=
           " ! glupload ! glcolorconvert ! gtkglsink name=__right_eye_sink__ "
           "sync=false force-aspect-ratio=false";
+    }
+
+    for (const auto &sink : right_unixfd_sinks) {
+      const std::string socket_path =
+          resolve_unixfd_socket_path(stereo.name, sink);
+      right_chain += " __right_out__. ! queue max-size-buffers=2 "
+                     "max-size-time=0 max-size-bytes=0 leaky=downstream"
+                     " ! videoconvert ! video/x-raw,format=I420"
+                     " ! queue name=__unixfd_ts_q_right__ max-size-buffers=2 "
+                     "max-size-time=0 max-size-bytes=0 leaky=downstream"
+                     " ! unixfdsink socket-path=" +
+                     socket_path + " sync=true async=false";
     }
   } else {
     right_chain += " ! glupload ! mix.sink_1";
@@ -699,8 +557,19 @@ build_pipeline_string(const sv::AppConfig &stereo,
       " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
       ",height=" + std::to_string(eye_h);
 
+  std::vector<sv::UnixfdSinkConfig> stereo_unixfd_sinks;
+  std::vector<sv::UnixfdSinkConfig> overlay_unixfd_sinks;
+  for (const auto &sink : stereo.unixfd_sinks) {
+    if (sink.stream == "stereo") {
+      stereo_unixfd_sinks.push_back(sink);
+    } else if (sink.stream == "overlay") {
+      overlay_unixfd_sinks.push_back(sink);
+    }
+  }
+
   const bool need_stereo_tee =
-      has_glimage || stereo.has_unixfd_socket_path || publish_stereo;
+      has_glimage || !stereo_unixfd_sinks.empty() || !overlay_unixfd_sinks.empty();
+
   if (need_stereo_tee) {
     output_chain += " ! tee name=__stereo_out__ ";
     if (has_glimage) {
@@ -714,8 +583,9 @@ build_pipeline_string(const sv::AppConfig &stereo,
                       "force-aspect-ratio=false name=__stereo_sink__";
     }
 
-    if (stereo.has_unixfd_socket_path) {
-      const std::string socket_path = resolve_unixfd_socket_path(stereo);
+    for (const auto &sink : stereo_unixfd_sinks) {
+      const std::string socket_path =
+          resolve_unixfd_socket_path(stereo.name, sink);
       const std::string unixfd_upload_chain = get_unixfd_upload_chain();
       output_chain += " __stereo_out__. ! queue max-size-buffers=2 "
                       "max-size-time=0 max-size-bytes=0 leaky=downstream"
@@ -727,12 +597,23 @@ build_pipeline_string(const sv::AppConfig &stereo,
                       socket_path + " sync=true async=false";
     }
 
-    if (publish_stereo) {
-      output_chain += " __stereo_out__. ! queue max-size-buffers=2 "
-                      "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                      " ! gldownload ! videoconvert ! video/x-raw,format=RGB"
-                      " ! appsink name=__ros_stereo_sink__ sync=false "
-                      "async=false emit-signals=true drop=true max-buffers=1";
+    if (!overlay_unixfd_sinks.empty()) {
+      output_chain +=
+          " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream"
+          " ! gldownload ! videoconvert ! cairooverlay "
+          "name=stereo_overlay_unixfd ! tee name=__overlay_out__ ";
+      for (const auto &sink : overlay_unixfd_sinks) {
+        const std::string socket_path =
+            resolve_unixfd_socket_path(stereo.name, sink);
+        output_chain +=
+            " __overlay_out__. ! queue max-size-buffers=2 "
+            "max-size-time=0 max-size-bytes=0 leaky=downstream"
+            " ! videoconvert ! video/x-raw,format=I420"
+            " ! queue name=__unixfd_ts_q_overlay__ max-size-buffers=2 "
+            "max-size-time=0 max-size-bytes=0 leaky=downstream"
+            " ! unixfdsink socket-path=" +
+            socket_path + " sync=true async=false";
+      }
     }
   } else {
     if (include_overlay) {
@@ -913,40 +794,17 @@ int main(int argc, char *argv[]) {
   }
 
   std::string pipeline_string;
-  std::string selected_viewer_name = "dvrk_display";
-  std::vector<RosImageTarget> selected_ros_targets;
 
   RCLCPP_INFO(node->get_logger(), "Loaded viewer config: %s", cfg.name.c_str());
   console_name = cfg.dvrk_console_namespace;
   overlay_state->overlay_alpha = cfg.overlay_alpha;
   overlay_state->display_horizontal_offset_px =
       cfg.display_horizontal_offset_px;
-  selected_viewer_name = cfg.name.empty() ? "dvrk_display" : cfg.name;
   const sv::AppConfig &app_cfg = cfg;
-
-  if (!parse_ros_image_publishers(cfg.ros_image_publishers, node->get_logger(),
-                                  selected_ros_targets)) {
-    rclcpp::shutdown();
-    return 1;
-  }
-
-  if (!selected_ros_targets.empty()) {
-    std::string topics;
-    const std::string topic_prefix = trim_topic_tokens(selected_viewer_name);
-    for (const auto &target : selected_ros_targets) {
-      if (!topics.empty()) {
-        topics += ", ";
-      }
-      topics +=
-          topic_prefix + "/" + ros_image_target_name(target) + "/image_raw";
-    }
-    RCLCPP_INFO(node->get_logger(), "ROS image publishing enabled for: %s",
-                topics.c_str());
-  }
 
   if (app_cfg.left.source.empty() || app_cfg.right.source.empty()) {
     RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must define left_stream and right_stream",
+                 "Config '%s' must define left and right",
                  cfg.name.c_str());
     rclcpp::shutdown();
     return 1;
@@ -974,20 +832,15 @@ int main(int argc, char *argv[]) {
   }
 
   const std::string unixfd_upload_chain = get_unixfd_upload_chain();
-  const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
-  if (app_cfg.has_unixfd_socket_path) {
-    if (app_cfg.unixfd_socket_path.empty()) {
-      RCLCPP_INFO(node->get_logger(), "unixfd publish path (default): %s",
-                  unixfd_socket_path.c_str());
-    } else {
-      RCLCPP_INFO(node->get_logger(), "unixfd publish path: %s",
-                  unixfd_socket_path.c_str());
+  if (!app_cfg.unixfd_sinks.empty()) {
+    for (const auto &sink : app_cfg.unixfd_sinks) {
+      const std::string socket_path =
+          resolve_unixfd_socket_path(app_cfg.name, sink);
+      RCLCPP_INFO(node->get_logger(), "unixfd sink: stream=%s path=%s",
+                  sink.stream.c_str(), socket_path.c_str());
     }
-    RCLCPP_INFO(node->get_logger(), "unixfd export chain: %s",
-                unixfd_upload_chain.c_str());
   } else {
-    RCLCPP_INFO(node->get_logger(),
-                "unixfd publish disabled (unixfd_socket_path is set to empty)");
+    RCLCPP_INFO(node->get_logger(), "No unixfd sinks configured");
   }
 
   if (app_cfg.sink_streams.empty()) {
@@ -999,27 +852,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  pipeline_string =
-      build_pipeline_string(app_cfg, selected_ros_targets, overlay_available);
-
-  std::vector<std::unique_ptr<RosImagePublisherContext>> ros_publisher_contexts;
-  std::shared_ptr<image_transport::ImageTransport> ros_image_transport;
-  if (!selected_ros_targets.empty()) {
-    ros_image_transport =
-        std::make_shared<image_transport::ImageTransport>(node);
-    const std::string viewer_topic_base =
-        trim_topic_tokens(selected_viewer_name);
-    for (const auto &target : selected_ros_targets) {
-      auto publisher_context = std::make_unique<RosImagePublisherContext>();
-      publisher_context->target = target;
-      publisher_context->topic_base =
-          viewer_topic_base + "/" + ros_image_target_name(target);
-      publisher_context->frame_id = publisher_context->topic_base + "_frame";
-      publisher_context->publisher = ros_image_transport->advertiseCamera(
-          publisher_context->topic_base + "/image_raw", 10);
-      ros_publisher_contexts.push_back(std::move(publisher_context));
-    }
-  }
+  pipeline_string = build_pipeline_string(app_cfg, overlay_available);
 
   const std::string camera_topic = "/" + console_name + "/camera";
   const std::string clutch_topic = "/" + console_name + "/clutch";
@@ -1322,27 +1155,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  for (auto &publisher_context : ros_publisher_contexts) {
-    GstElement *ros_sink = gst_bin_get_by_name(
-        GST_BIN(pipeline), ros_sink_name(publisher_context->target).c_str());
-    if (ros_sink == nullptr) {
-      RCLCPP_ERROR(
-          node->get_logger(),
-          "Failed to find GStreamer sink '%s' for ROS image target '%s'",
-          ros_sink_name(publisher_context->target).c_str(),
-          ros_image_target_name(publisher_context->target).c_str());
-      gst_element_set_state(pipeline, GST_STATE_NULL);
-      gst_object_unref(pipeline);
-      rclcpp::shutdown();
-      return 1;
-    }
-
-    g_signal_connect(ros_sink, "new-sample",
-                     G_CALLBACK(on_new_ros_image_sample),
-                     publisher_context.get());
-    gst_object_unref(ros_sink);
-  }
-
   g_app = Gtk::Application::create("org.dvrk.display");
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
   g_unix_signal_add(SIGTERM, on_sigint, nullptr);
@@ -1359,18 +1171,18 @@ int main(int argc, char *argv[]) {
 
   ControlWindow window(overlay_state, pipeline);
 
-  if (app_cfg.has_unixfd_socket_path) {
-    const std::string unixfd_socket_path = resolve_unixfd_socket_path(app_cfg);
-    if (std::filesystem::exists(unixfd_socket_path)) {
+  for (const auto &sink : app_cfg.unixfd_sinks) {
+    const std::string socket_path =
+        resolve_unixfd_socket_path(app_cfg.name, sink);
+    if (std::filesystem::exists(socket_path)) {
       RCLCPP_INFO(node->get_logger(),
                   "Removing stale unixfd socket before starting pipeline: %s",
-                  unixfd_socket_path.c_str());
+                  socket_path.c_str());
       std::error_code remove_error;
-      if (!std::filesystem::remove(unixfd_socket_path, remove_error) &&
-          remove_error) {
+      if (!std::filesystem::remove(socket_path, remove_error) && remove_error) {
         RCLCPP_WARN(node->get_logger(),
                     "Unable to remove stale unixfd socket '%s': %s",
-                    unixfd_socket_path.c_str(), remove_error.message().c_str());
+                    socket_path.c_str(), remove_error.message().c_str());
       }
     }
   }

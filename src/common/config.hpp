@@ -19,10 +19,15 @@ struct ColorAdjustment {
     double hue = 0.0;
 };
 
+struct UnixfdSinkConfig {
+    std::string stream;
+    std::string name;
+    std::string socket_path;
+};
+
 struct AppConfig {
     std::string name = "dvrk_display";
     std::string dvrk_console_namespace = "console";
-    std::vector<std::string> ros_image_publishers;
     double overlay_alpha = 0.7;
 
     SourceConfig left;
@@ -39,8 +44,7 @@ struct AppConfig {
     bool preserve_size = true;
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;
-    bool has_unixfd_socket_path = true;
-    std::string unixfd_socket_path = "";
+    std::vector<UnixfdSinkConfig> unixfd_sinks;
 };
 
 class Config {

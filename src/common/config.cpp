@@ -67,13 +67,6 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     if (cfg.dvrk_console_namespace.empty()) {
         cfg.dvrk_console_namespace = "console";
     }
-    if (root.isMember("ros_image_publishers") && root["ros_image_publishers"].isArray()) {
-        for (const auto& item : root["ros_image_publishers"]) {
-            if (item.isString()) {
-                cfg.ros_image_publishers.push_back(item.asString());
-            }
-        }
-    }
     cfg.overlay_alpha = root.get("overlay_alpha", 0.7).asDouble();
 
     if (root.isMember("original_width")) {
@@ -114,26 +107,34 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
             }
         }
     }
-    if (root.isMember("unixfd_socket_path")) {
-        cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();
-        cfg.has_unixfd_socket_path = !cfg.unixfd_socket_path.empty();
+    if (root.isMember("unixfdsinks") && root["unixfdsinks"].isArray()) {
+        for (const auto& item : root["unixfdsinks"]) {
+            if (!item.isMember("stream")) {
+                continue;
+            }
+            UnixfdSinkConfig sc;
+            sc.stream = item["stream"].asString();
+            sc.name = item.get("name", "").asString();
+            sc.socket_path = item.get("socket_path", "").asString();
+            cfg.unixfd_sinks.push_back(sc);
+        }
     }
-    if (root.isMember("left_stream")) {
-        cfg.left.source = root["left_stream"].asString();
+    if (root.isMember("left")) {
+        cfg.left.source = root["left"].asString();
         if (cfg.left.source.empty()) {
-            throw std::runtime_error("Configuration error: 'left_stream' is present but empty.");
+            throw std::runtime_error("Configuration error: 'left' is present but empty.");
         }
     } else {
-        throw std::runtime_error("Configuration error: Required field 'left_stream' is missing.");
+        throw std::runtime_error("Configuration error: Required field 'left' is missing.");
     }
 
-    if (root.isMember("right_stream")) {
-        cfg.right.source = root["right_stream"].asString();
+    if (root.isMember("right")) {
+        cfg.right.source = root["right"].asString();
         if (cfg.right.source.empty()) {
-            throw std::runtime_error("Configuration error: 'right_stream' is present but empty.");
+            throw std::runtime_error("Configuration error: 'right' is present but empty.");
         }
     } else {
-        throw std::runtime_error("Configuration error: Required field 'right_stream' is missing.");
+        throw std::runtime_error("Configuration error: Required field 'right' is missing.");
     }
 
     if (cfg.crop_width <= 0) {

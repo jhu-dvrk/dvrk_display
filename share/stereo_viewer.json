@@ -1,9 +1,6 @@
 {
   "type": "dd::display_config@1.0.0",
   "name": "dvrk_display",
-  "ros_image_publishers": [
-    "stereo"
-  ],
   "dvrk_console_namespace": "console",
   "original_width": 640,
   "original_height": 480,
@@ -14,6 +11,11 @@
   "sinks": [
     "glimage"
   ],
-  "left_stream": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1",
-  "right_stream": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+  "unixfdsinks": [
+    {
+      "stream": "stereo"
+    }
+  ],
+  "left": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1",
+  "right": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
 }

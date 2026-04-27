@@ -245,8 +245,8 @@ def ensure_config_fields(config):
     config.setdefault("horizontal_shift_px", 0)
     config.setdefault("vertical_shift_px", 0)
     config.setdefault("display_horizontal_offset_px", 0)
-    config.setdefault("left_stream", "")
-    config.setdefault("right_stream", "")
+    config.setdefault("left", "")
+    config.setdefault("right", "")
     config.setdefault("sinks", ["glimage"])
     config.setdefault("left_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     config.setdefault("right_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
@@ -270,8 +270,8 @@ def load_or_create(path: Path):
         "horizontal_shift_px": 0,
         "vertical_shift_px": 0,
         "display_horizontal_offset_px": 0,
-        "left_stream": "",
-        "right_stream": "",
+        "left": "",
+        "right": "",
         "sinks": ["glimage"],
         "preserve_size": True,
         "left_color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0},
@@ -296,17 +296,17 @@ def parse_args():
 
 def apply_stream_overrides(config, args):
     if args.left is not None:
-        config["left_stream"] = args.left
+        config["left"] = args.left
     if args.right is not None:
-        config["right_stream"] = args.right
+        config["right"] = args.right
 
 
-def update_config_from_runtime(config, left_stream, right_stream, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, display_horizontal_offset, left_color, right_color):
+def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, display_horizontal_offset, left_color, right_color):
     config["type"] = "dd::display_config@1.0.0"
     config.setdefault("name", "dvrk_display")
 
-    config["left_stream"] = left_stream
-    config["right_stream"] = right_stream
+    config["left"] = left
+    config["right"] = right
     config["original_width"] = int(original_w)
     config["original_height"] = int(original_h)
     config["crop_width"] = int(crop_w)
@@ -319,10 +319,10 @@ def update_config_from_runtime(config, left_stream, right_stream, original_w, or
 
 
 def interactive_tune(config, split_mode=False, psm_name=None):
-    left_stream = config.get("left_stream", "").strip()
-    right_stream = config.get("right_stream", "").strip()
-    if not left_stream or not right_stream:
-        raise RuntimeError("Both left_stream and right_stream are required")
+    left = config.get("left", "").strip()
+    right = config.get("right", "").strip()
+    if not left or not right:
+        raise RuntimeError("Both left and right are required")
 
     ral = None
     arm = None
@@ -637,8 +637,8 @@ def interactive_tune(config, split_mode=False, psm_name=None):
     cv2.destroyAllWindows()
 
     return {
-        "left_stream": left_stream,
-        "right_stream": right_stream,
+        "left": left,
+        "right": right,
         "original_width": int(original_w),
         "original_height": int(original_h),
         "crop_width": int(crop_w),
@@ -674,8 +674,8 @@ def main():
 
     update_config_from_runtime(
         config,
-        runtime_values["left_stream"],
-        runtime_values["right_stream"],
+        runtime_values["left"],
+        runtime_values["right"],
         runtime_values["original_width"],
         runtime_values["original_height"],
         runtime_values["crop_width"],
@@ -708,7 +708,7 @@ def main():
         stream.write(rendered + "\n")
 
     print(f"Wrote {path}")
-    print("Saved fields: left_stream, right_stream, original_*, crop_*, *_shift_px")
+    print("Saved fields: left, right, original_*, crop_*, *_shift_px")
     return 0
 
 

@@ -1,9 +1,6 @@
 {
   "type": "dd::display_config@1.0.0",
   "name": "dvrk_display",
-  "ros_image_publishers": [
-    "stereo"
-  ],
   "dvrk_console_namespace": "console",
   "original_width": 1920,
   "original_height": 1080,
@@ -14,6 +11,6 @@
   ],
   "horizontal_shift_px": 0,
   "vertical_shift_px": 0,
-  "left_stream": "decklinkvideosrc device-number=0 connection=sdi mode=1080i5994",
-  "right_stream": "decklinkvideosrc device-number=1 connection=sdi mode=1080i5994"
+  "left": "decklinkvideosrc device-number=0 connection=sdi mode=1080i5994",
+  "right": "decklinkvideosrc device-number=1 connection=sdi mode=1080i5994"
 }
