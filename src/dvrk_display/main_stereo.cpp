@@ -11,6 +11,7 @@
 
 #include <gst/video/navigation.h>
 #include <gtkmm.h>
+#include <gdk/gdkkeysyms.h>
 
 #include <algorithm>
 #include <atomic>
@@ -656,6 +657,8 @@ public:
         sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
     m_vbox.pack_start(m_btn_quit);
 
+    add_events(Gdk::KEY_PRESS_MASK);
+
     show_all_children();
 
     const std::vector<std::string> sink_names = {
@@ -667,6 +670,17 @@ public:
         g_object_get(sink, "widget", &gtk_widget, NULL);
         if (gtk_widget) {
           auto win = std::make_unique<Gtk::Window>();
+          win->add_events(Gdk::KEY_PRESS_MASK);
+          win->signal_key_press_event().connect(
+              [this](GdkEventKey *event) {
+                if ((event->state & GDK_CONTROL_MASK) && (event->keyval == GDK_KEY_q)) {
+                    on_quit_clicked();
+                    return true;
+                }
+                return false;
+              },
+              false);
+
           win->set_title(name == "__stereo_sink__"
                              ? "Stereo Display"
                              : (name == "__left_eye_sink__"
@@ -685,6 +699,14 @@ public:
   }
 
 protected:
+  bool on_key_press_event(GdkEventKey *event) override {
+    if ((event->state & GDK_CONTROL_MASK) && (event->keyval == GDK_KEY_q)) {
+      on_quit_clicked();
+      return true;
+    }
+    return Gtk::Window::on_key_press_event(event);
+  }
+
   void on_overlay_toggled() {
     std::scoped_lock<std::mutex> lock(m_overlay_state->mutex);
     m_overlay_state->overlay_enabled = m_btn_overlay.get_active();

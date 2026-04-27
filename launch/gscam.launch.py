@@ -31,7 +31,7 @@ def generate_launch_description():
     )
     namespace_arg = DeclareLaunchArgument(
         "namespace",
-        default_value=[LaunchConfiguration("viewer_name"), "/", LaunchConfiguration("stream"), "/camera"],
+        default_value=[LaunchConfiguration("viewer_name"), "/", LaunchConfiguration("stream")],
         description=(
             "ROS namespace for gscam. image_raw, image_raw/compressed, "
             "and camera_info are all published under this namespace."
