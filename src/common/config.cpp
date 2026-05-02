@@ -52,6 +52,14 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         return color;
     };
 
+    if (root.isMember("unixfd_socket_path") && root["unixfd_socket_path"].isString()) {
+        cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();
+    }
+
+    if (root.isMember("stream") && root["stream"].isString()) {
+        cfg.stream = root["stream"].asString();
+    }
+
     if (root.isMember("left_color")) {
         cfg.left_color = parse_color(root["left_color"]);
     }
@@ -119,22 +127,30 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
             cfg.unixfd_sinks.push_back(sc);
         }
     }
-    if (root.isMember("left")) {
-        cfg.left.source = root["left"].asString();
-        if (cfg.left.source.empty()) {
-            throw std::runtime_error("Configuration error: 'left' is present but empty.");
+    std::string config_type = root.get("type", "").asString();
+    
+    if (config_type == "dd::mono_config@1.0.0") {
+        if (cfg.stream.empty()) {
+            throw std::runtime_error("Configuration error: Required field 'stream' is missing for mono config.");
         }
     } else {
-        throw std::runtime_error("Configuration error: Required field 'left' is missing.");
-    }
+        if (root.isMember("left")) {
+            cfg.left.source = root["left"].asString();
+            if (cfg.left.source.empty()) {
+                throw std::runtime_error("Configuration error: 'left' is present but empty.");
+            }
+        } else {
+            throw std::runtime_error("Configuration error: Required field 'left' is missing.");
+        }
 
-    if (root.isMember("right")) {
-        cfg.right.source = root["right"].asString();
-        if (cfg.right.source.empty()) {
-            throw std::runtime_error("Configuration error: 'right' is present but empty.");
+        if (root.isMember("right")) {
+            cfg.right.source = root["right"].asString();
+            if (cfg.right.source.empty()) {
+                throw std::runtime_error("Configuration error: 'right' is present but empty.");
+            }
+        } else {
+            throw std::runtime_error("Configuration error: Required field 'right' is missing.");
         }
-    } else {
-        throw std::runtime_error("Configuration error: Required field 'right' is missing.");
     }
 
     if (cfg.crop_width <= 0) {

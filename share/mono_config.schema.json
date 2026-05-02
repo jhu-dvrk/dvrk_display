@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "dd::mono_config@1.0.0",
+  "title": "dvrk_display mono configuration",
+  "description": "Configuration file for the dvrk_display node in mono mode. Describes a single video source and ROS publishing targets.",
+  "type": "object",
+  "required": ["type", "stream"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "dd::mono_config@1.0.0",
+      "description": "Schema type identifier. Must be exactly \"dd::mono_config@1.0.0\"."
+    },
+    "name": {
+      "type": "string",
+      "default": "dvrk_display_mono",
+      "description": "Name of the viewer instance."
+    },
+    "dvrk_console_namespace": {
+      "type": "string",
+      "default": "console",
+      "description": "ROS namespace of the dVRK console."
+    },
+    "ros_image_publishers": {
+      "type": "array",
+      "default": [],
+      "description": "List of ROS image streams to publish. For mono, usually just \"mono\".",
+      "items": {
+        "type": "string",
+        "enum": ["mono"]
+      },
+      "uniqueItems": true
+    },
+    "overlay_alpha": {
+      "type": "number",
+      "default": 0.7,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Opacity of the HUD overlay."
+    },
+    "original_width": {
+      "type": "integer",
+      "description": "Desired width of the display window. If not provided, defaults to 640."
+    },
+    "original_height": {
+      "type": "integer",
+      "description": "Desired height of the display window. If not provided, defaults to 480."
+    },
+    "stream": {
+      "type": "string",
+      "description": "GStreamer pipeline fragment for the mono camera source."
+    },
+    "sinks": {
+      "type": "array",
+      "description": "List of sink definitions. Each specifies what to display and how to display it.",
+      "items": {
+        "type": "string",
+        "enum": ["glimage", "unixfd", "custom"],
+        "description": "Display method. 'glimage' for a standard OpenGL window, 'unixfd' for zero-copy shared memory, 'custom' for a user-specified string."
+      }
+    },
+    "unixfdsinks": {
+      "type": "array",
+      "description": "List of unixfdsink configurations. Used to expose internal pipeline streams via shared memory.",
+      "items": {
+        "type": "object",
+        "required": ["stream"],
+        "properties": {
+          "stream": {
+            "type": "string",
+            "enum": ["raw", "overlay"],
+            "description": "The internal video stream to attach to. 'raw' for video without HUD, 'overlay' for video with HUD."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional custom name for the GStreamer element."
+          },
+          "socket_path": {
+            "type": "string",
+            "description": "Optional custom socket path for this specific sink."
+          }
+        }
+      }
+    },
+    "unixfd_socket_path": {
+      "type": "string",
+      "description": "Global fallback filesystem path of the Unix file-descriptor socket used for zero-copy shared-memory transport."
+    }
+  }
+}

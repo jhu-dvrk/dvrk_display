@@ -18,7 +18,7 @@ namespace sv {
 
 namespace {
 
-enum class OverlayView { Stereo, LeftEye, RightEye };
+enum class OverlayView { Stereo, LeftEye, RightEye, Mono };
 
 OverlayView overlay_view_from_element(const GstElement *element) {
   if (element == nullptr) {
@@ -36,6 +36,9 @@ OverlayView overlay_view_from_element(const GstElement *element) {
   }
   if (name == "right_overlay") {
     return OverlayView::RightEye;
+  }
+  if (name == "mono_overlay") {
+    return OverlayView::Mono;
   }
   return OverlayView::Stereo;
 }
@@ -578,15 +581,17 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
   } else {
     // Single-eye layout: both PSM columns shown in every eye, only corner dot
     // differs.
-    constexpr double k_eye_dot_radius_ratio = 2.0 / 425.0;
-    const double dot_r = image_scale * k_eye_dot_radius_ratio;
-    const double dot_x = overlay_view == OverlayView::LeftEye
-                             ? dot_r
-                             : static_cast<double>(frame_width) - dot_r;
-    cairo_new_path(cr);
-    cairo_arc(cr, dot_x, dot_r, dot_r, 0.0, 2.0 * M_PI);
-    cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, overlay_alpha);
-    cairo_fill(cr);
+    if (overlay_view != OverlayView::Mono) {
+      constexpr double k_eye_dot_radius_ratio = 2.0 / 425.0;
+      const double dot_r = image_scale * k_eye_dot_radius_ratio;
+      const double dot_x = overlay_view == OverlayView::LeftEye
+                               ? dot_r
+                               : static_cast<double>(frame_width) - dot_r;
+      cairo_new_path(cr);
+      cairo_arc(cr, dot_x, dot_r, dot_r, 0.0, 2.0 * M_PI);
+      cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, overlay_alpha);
+      cairo_fill(cr);
+    }
     draw_teleop_column(left_teleops, theme.psm_x_margin, true);
     draw_teleop_column(right_teleops,
                        static_cast<double>(frame_width) - theme.psm_x_margin,

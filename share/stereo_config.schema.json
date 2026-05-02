@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "dd::stereo_config@1.0.0",
+  "title": "dvrk_display configuration",
+  "description": "Configuration file for the dvrk_display node. Describes video sources, image geometry corrections, ROS publishing targets, and the GStreamer output sink.",
+  "type": "object",
+  "required": ["type", "left_stream", "right_stream"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "dd::stereo_config@1.0.0",
+      "description": "Schema type identifier. Must be exactly \"dd::stereo_config@1.0.0\". The application validates this field on startup and refuses to load a file with a mismatched type."
+    },
+    "name": {
+      "type": "string",
+      "default": "dvrk_display",
+      "description": "Name of the viewer instance. Used as the ROS node name and in log output."
+    },
+    "dvrk_console_namespace": {
+      "type": "string",
+      "default": "console",
+      "description": "ROS namespace of the dVRK console. Used to discover teleop and PSM topics (e.g. /<namespace>/teleop/selected, /<namespace>/PSM1/measured_cp)."
+    },
+    "ros_image_publishers": {
+      "type": "array",
+      "default": [],
+      "description": "List of ROS image streams to publish in addition to the display output. Each entry must be one of \"left\", \"right\", or \"stereo\". The combined stereo frame is available as \"stereo\".",
+      "items": {
+        "type": "string",
+        "enum": ["left", "right", "stereo"]
+      },
+      "uniqueItems": true
+    },
+    "overlay_alpha": {
+      "type": "number",
+      "default": 0.7,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Opacity of the HUD overlay drawn on top of the video (0 = fully transparent, 1 = fully opaque)."
+    },
+    "original_width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Native width of each camera frame in pixels before any cropping. Must be provided as a positive integer. Left and right streams must have identical dimensions."
+    },
+    "original_height": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Native height of each camera frame in pixels before any cropping. Must be provided as a positive integer."
+    },
+    "crop_width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Width of the output region in pixels after applying the alignment shift and crop. Defaults to original_width when omitted."
+    },
+    "crop_height": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Height of the output region in pixels after applying the alignment shift and crop. Defaults to original_height when omitted."
+    },
+    "horizontal_shift_px": {
+      "type": "integer",
+      "default": 0,
+      "description": "Horizontal pixel offset applied to the right eye image relative to the left eye to correct stereo misalignment. Positive values shift the right image to the right."
+    },
+    "vertical_shift_px": {
+      "type": "integer",
+      "default": 0,
+      "description": "Vertical pixel offset applied to the right eye image relative to the left eye to correct stereo misalignment. Positive values shift the right image down."
+    },
+    "preserve_size": {
+      "type": "boolean",
+      "default": true,
+      "description": "If true, the output video size will match the crop_width and crop_height. If false, it will match the original_width/height and show black bars."
+    },
+    "left_stream": {
+      "type": "string",
+      "description": "GStreamer pipeline fragment for the left camera source. Must end with a raw video pad (video/x-raw). Example: \"v4l2src device=/dev/video0 ! video/x-raw,width=640,height=480,framerate=30/1\"."
+    },
+    "right_stream": {
+      "type": "string",
+      "description": "GStreamer pipeline fragment for the right camera source. Same format as left_stream. Must produce frames with the same dimensions and frame rate as left_stream."
+    },
+    "sinks": {
+      "type": "array",
+      "description": "List of sink definitions. Each specifies what to display and how to display it.",
+      "items": {
+        "type": "object",
+        "required": ["what", "how"],
+        "properties": {
+          "what": {
+            "type": "string",
+            "enum": ["video", "overlay"],
+            "description": "Source for the sink. 'video' is after stereo correction, 'overlay' is after the HUD overlay is applied."
+          },
+          "how": {
+            "type": "string",
+            "enum": ["glimage", "glimages", "unixfd", "custom"],
+            "description": "Display method. 'glimage' for a single side-by-side view, 'glimages' for two separate eye views, 'unixfd' for zero-copy shared memory, 'custom' for a user-specified string."
+          },
+          "custom": {
+            "type": "string",
+            "description": "GStreamer sink string if 'how' is 'custom'."
+          }
+        }
+      }
+    },
+    "unixfd_socket_path": {
+      "type": "string",
+      "description": "Filesystem path of the Unix file-descriptor socket used for zero-copy shared-memory transport (GStreamer unixfdsink/unixfdsrc). When set, the combined stereo frame is also published on this socket in addition to the normal display sink. Leave unset or empty to disable."
+    },
+    "extra_streams": {
+      "type": "object",
+      "description": "Optional section for injecting additional mono video sources into the surgeon's display. The stereo video is scaled to occupy the top (1-scale) fraction of each eye view, and up to 2 mono streams are displayed side-by-side in the remaining bottom area. A black gap separates the regions.",
+      "additionalProperties": false,
+      "properties": {
+        "monos": {
+          "type": "array",
+          "description": "List of GStreamer pipeline fragments (source snippets) for mono external video streams (e.g. ECG, ultrasound). The same video is shown in both left and right eye views.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "stereos": {
+          "type": "array",
+          "description": "List of stereo external video streams. Each entry must define separate 'left' and 'right' GStreamer pipeline fragments which will be routed exclusively to their respective eye views.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "left": {
+                "type": "string",
+                "description": "GStreamer pipeline fragment for the left eye view."
+              },
+              "right": {
+                "type": "string",
+                "description": "GStreamer pipeline fragment for the right eye view."
+              }
+            },
+            "required": ["left", "right"],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "scale": {
+          "type": "number",
+          "description": "Fraction of each eye's display height allocated to the extra streams (bottom portion). Must be between 0.05 and 0.95. The stereo video occupies (1-scale) of the height.",
+          "minimum": 0.05,
+          "maximum": 0.95,
+          "default": 0.3
+        }
+      }
+    }
+  }
+}
+

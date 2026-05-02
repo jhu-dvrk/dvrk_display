@@ -45,6 +45,8 @@ struct AppConfig {
 
     SourceConfig left;
     SourceConfig right;
+    std::string stream; // For mono config
+    std::string unixfd_socket_path;
     ColorAdjustment left_color;
     ColorAdjustment right_color;
     int original_width = 0;
