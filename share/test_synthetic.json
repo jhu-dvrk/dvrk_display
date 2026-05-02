@@ -1,0 +1,26 @@
+{
+  "type": "dd::display_config@1.0.0",
+  "name": "dvrk_test_synthetic",
+  "ros_image_publishers": [
+    "stereo"
+  ],
+  "dvrk_console_namespace": "console",
+  "original_width": 640,
+  "original_height": 480,
+  "crop_width": 640,
+  "crop_height": 480,
+  "horizontal_shift_px": 0,
+  "vertical_shift_px": 0,
+  "sinks": [
+    "glimage"
+  ],
+  "extra_streams": {
+    "monos": [
+      "videotestsrc pattern=checkers-4 is-live=true ! video/x-raw,width=320,height=240,framerate=30/1"
+    ],
+    "scale": 0.3
+  },
+  "left_stream": "shmsrc socket-path=/tmp/dvrk_test_l ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2",
+  "right_stream": "shmsrc socket-path=/tmp/dvrk_test_r ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2"
+}
+

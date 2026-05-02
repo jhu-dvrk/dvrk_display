@@ -144,6 +144,50 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.crop_height = cfg.original_height;
     }
 
+    if (root.isMember("extra_streams") && root["extra_streams"].isObject()) {
+        const Json::Value& es = root["extra_streams"];
+        if (es.isMember("monos") && es["monos"].isArray()) {
+            for (const auto& item : es["monos"]) {
+                if (!item.isString()) continue;
+                if (!item.asString().empty()) {
+                    cfg.extra_streams.monos.push_back(item.asString());
+                }
+            }
+        }
+        
+        if (es.isMember("stereos") && es["stereos"].isArray()) {
+            for (const auto& item : es["stereos"]) {
+                if (!item.isObject()) continue;
+                if (item.isMember("left") && item.isMember("right") && 
+                    item["left"].isString() && item["right"].isString()) {
+                    StereoExtraStream ses;
+                    ses.left = item["left"].asString();
+                    ses.right = item["right"].asString();
+                    if (!ses.left.empty() && !ses.right.empty()) {
+                        cfg.extra_streams.stereos.push_back(ses);
+                    }
+                }
+            }
+        }
+
+        // Enforce maximum of 2 total streams (monos + stereos)
+        int total_streams = cfg.extra_streams.monos.size() + cfg.extra_streams.stereos.size();
+        if (total_streams > 2) {
+            std::cerr << "Warning: Maximum of 2 extra streams allowed. Truncating." << std::endl;
+            while (cfg.extra_streams.monos.size() + cfg.extra_streams.stereos.size() > 2) {
+                if (!cfg.extra_streams.stereos.empty()) {
+                    cfg.extra_streams.stereos.pop_back();
+                } else {
+                    cfg.extra_streams.monos.pop_back();
+                }
+            }
+        }
+        if (es.isMember("scale")) {
+            const double s = es["scale"].asDouble();
+            cfg.extra_streams.scale = std::max(0.01, std::min(0.99, s));
+        }
+    }
+
     return cfg;
 }
 

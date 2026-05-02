@@ -25,7 +25,20 @@ struct UnixfdSinkConfig {
     std::string socket_path;
 };
 
+struct StereoExtraStream {
+    std::string left;
+    std::string right;
+};
+
+struct ExtraStreamsConfig {
+    std::vector<std::string> monos;
+    std::vector<StereoExtraStream> stereos;
+    // Fraction of eye height used by the extra streams (0.0–1.0). Default 0.3.
+    double scale = 0.3;
+};
+
 struct AppConfig {
+    static constexpr int gap_px = 4;
     std::string name = "dvrk_display";
     std::string dvrk_console_namespace = "console";
     double overlay_alpha = 0.7;
@@ -45,6 +58,7 @@ struct AppConfig {
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;
     std::vector<UnixfdSinkConfig> unixfd_sinks;
+    ExtraStreamsConfig extra_streams;
 };
 
 class Config {

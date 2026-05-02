@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -366,6 +367,9 @@ std::string color_adjustment_string(const sv::ColorAdjustment &color) {
          " hue=" + std::to_string(color.hue);
 }
 
+// Helper: ensure a pixel count is even (round down)
+static int make_even(int v) { return v & ~1; }
+
 std::string
 build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
   int base_crop_w =
@@ -468,8 +472,8 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
         left_chain += " ! videoconvert ! cairooverlay name=left_overlay";
       }
       left_chain +=
-          " ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__ "
-          "sync=false force-aspect-ratio=false";
+          " ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__"
+          " sync=false force-aspect-ratio=false";
     }
 
     for (const auto &sink : left_unixfd_sinks) {
@@ -516,8 +520,8 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
         right_chain += " ! videoconvert ! cairooverlay name=right_overlay";
       }
       right_chain +=
-          " ! glupload ! glcolorconvert ! gtkglsink name=__right_eye_sink__ "
-          "sync=false force-aspect-ratio=false";
+          " ! glupload ! glcolorconvert ! gtkglsink name=__right_eye_sink__"
+          " sync=false force-aspect-ratio=false";
     }
 
     for (const auto &sink : right_unixfd_sinks) {
@@ -549,6 +553,200 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
                          stereo.display_horizontal_offset_px / 2 -
                          (shifted_eye_w / 2);
 
+  // -----------------------------------------------------------------------
+  // Extra mono streams layout
+  // -----------------------------------------------------------------------
+  const auto &es = stereo.extra_streams;
+  const int n_mono = static_cast<int>(es.monos.size());
+  const int n_stereo = static_cast<int>(es.stereos.size());
+  const int n_extra_streams = n_mono + n_stereo;
+  const bool has_extra = n_extra_streams > 0 && es.scale > 0.01;
+
+  // stereo_h: height occupied by the stereo region in the final eye frame
+  // extra_h:  remaining height for mono streams
+  // gap_px:   black spacer between regions and between streams
+  int stereo_h = eye_h;
+  int extra_h  = 0;
+  int gap_px   = 0;
+
+  if (has_extra) {
+    gap_px   = sv::AppConfig::gap_px;
+    stereo_h = make_even(static_cast<int>(std::round(eye_h * (1.0 - es.scale))));
+    stereo_h = std::max(2, std::min(eye_h - 2, stereo_h));
+    extra_h  = eye_h - stereo_h; // includes the gap row
+  }
+
+  // slot_w: width of each extra stream within one eye's view
+  int slot_w = 0;
+  if (has_extra && n_extra_streams > 0) {
+    slot_w = make_even((eye_w - (n_extra_streams - 1) * gap_px) / n_extra_streams);
+    slot_w = std::max(2, slot_w);
+  }
+  // height of the visible mono content (extra_h minus top gap)
+  const int mono_h = has_extra ? std::max(2, extra_h - gap_px) : 0;
+
+  // Mono source chains: each stream is tee'd so it can feed both left and
+  // right eye compositors (and the combined stereo compositor).
+  // We do NOT glupload before the tee — keep in CPU memory so downstream
+  // videoscale elements can work without gldownload/glupload round-trips.
+  // -----------------------------------------------------------------------
+  std::string extra_chains;
+  if (has_extra) {
+    for (int i = 0; i < n_mono; ++i) {
+      extra_chains += es.monos[i] +
+          " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
+          " leaky=downstream ! tee name=__extra_mono" + std::to_string(i) + "__  ";
+    }
+    for (int i = 0; i < n_stereo; ++i) {
+      extra_chains += es.stereos[i].left +
+          " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
+          " leaky=downstream ! tee name=__extra_stereo_left" + std::to_string(i) + "__  ";
+      extra_chains += es.stereos[i].right +
+          " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
+          " leaky=downstream ! tee name=__extra_stereo_right" + std::to_string(i) + "__  ";
+    }
+  }
+
+  // Helper: append branches from extra tees into a named glvideomixer.
+  // mix_name:  name of the destination glvideomixer
+  // start_sink: first sink index (sink_0 is already used by stereo)
+  // is_left_eye: true if this compositor is for the left eye
+  auto append_extra_branches = [&](std::string &chain, const std::string &mix_name,
+                                   int start_sink, bool is_left_eye) {
+    for (int i = 0; i < n_mono; ++i) {
+      const int sink_idx = start_sink + i;
+      chain += " __extra_mono" + std::to_string(i) + "__. "
+               "! queue max-size-buffers=2 leaky=downstream"
+               " ! glupload ! " + mix_name + ".sink_" + std::to_string(sink_idx) + " ";
+    }
+    for (int i = 0; i < n_stereo; ++i) {
+      const int sink_idx = start_sink + n_mono + i;
+      std::string tee_name = is_left_eye ? "__extra_stereo_left" : "__extra_stereo_right";
+      chain += " " + tee_name + std::to_string(i) + "__. "
+               "! queue max-size-buffers=2 leaky=downstream"
+               " ! glupload ! " + mix_name + ".sink_" + std::to_string(sink_idx) + " ";
+    }
+  };
+
+  // Helper: build the glvideomixer description string for a per-eye compositor.
+  // stereo_w: width of the stereo region in this compositor (eye_w for per-eye,
+  //           2*eye_w for combined)
+  auto make_eye_mixer_desc = [&](const std::string &mix_name, int stereo_w,
+                                 int x_offset) -> std::string {
+    std::string d = "glvideomixer name=" + mix_name + " background=1";
+    // sink_0: stereo region
+    d += " sink_0::xpos=0 sink_0::ypos=0";
+    d += " sink_0::width=" + std::to_string(stereo_w);
+    d += " sink_0::height=" + std::to_string(stereo_h);
+    d += " sink_0::sizing-policy=1";
+    // sink_1..N: extra streams
+    for (int i = 0; i < n_extra_streams; ++i) {
+      const int xpos = x_offset + i * (slot_w + gap_px);
+      const int ypos = stereo_h + gap_px;
+      const int sink_idx = 1 + i;
+      d += " sink_" + std::to_string(sink_idx) + "::xpos=" + std::to_string(xpos);
+      d += " sink_" + std::to_string(sink_idx) + "::ypos=" + std::to_string(ypos);
+      d += " sink_" + std::to_string(sink_idx) + "::width=" + std::to_string(slot_w);
+      d += " sink_" + std::to_string(sink_idx) + "::height=" + std::to_string(mono_h);
+      d += " sink_" + std::to_string(sink_idx) + "::sizing-policy=1";
+      d += " sink_" + std::to_string(sink_idx) + "::yalign=0.0";
+    }
+    return d;
+  };
+
+  // -----------------------------------------------------------------------
+  // Rebuild left / right chains to scale stereo down when has_extra.
+  // -----------------------------------------------------------------------
+  // We need to regenerate them now that we know stereo_h.
+  // Re-derive the chains with stereo downscale inserted before the sinks.
+
+  // NOTE: We reconstruct left_chain and right_chain entirely here when
+  // has_extra, to insert the videoscale + per-eye compositor.
+  // The unixfd sink branches are kept as-is (they don't composite).
+
+  if (has_extra) {
+    // --- Left chain with per-eye compositor (glimages path) ---
+    if (has_glimages) {
+      // Replace the left glimages branch: scale stereo down, then composite.
+      // We need to rebuild left_chain from scratch for the glimages branch.
+      // The existing left_chain already ends with a tee (__left_out__) that
+      // feeds mix.sink_0 and __left_eye_sink__. We insert the compositor
+      // between __left_out__ and the eye sink.
+
+      // Find and replace the gtkglsink branch in left_chain.
+      // Pattern: "__left_out__. ! queue max-size-buffers=1 leaky=downstream
+      //           [! videoconvert ! cairooverlay name=left_overlay]
+      //           ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__"
+      // Replace with:
+      //   __left_out__. ! queue ! videoscale ! caps(stereo_h)
+      //   [! videoconvert ! cairooverlay name=left_overlay]
+      //   ! glupload ! __left_eye_comp__.sink_0
+      //   <mono branches into __left_eye_comp__>
+      //   <make_eye_mixer_desc(__left_eye_comp__, eye_w, 0)> ! caps(eye_h) ! gtkglsink
+
+      std::string left_eye_branch =
+          " __left_out__. ! queue max-size-buffers=1 leaky=downstream";
+      if (include_overlay) {
+        left_eye_branch += " ! videoconvert ! cairooverlay name=left_overlay";
+      }
+      left_eye_branch += " ! glupload ! __left_eye_comp__.sink_0";
+      // Extra branches
+      append_extra_branches(left_eye_branch, "__left_eye_comp__", 1, true);
+      // Compositor element
+      left_eye_branch += " " + make_eye_mixer_desc("__left_eye_comp__", eye_w, 0);
+      left_eye_branch +=
+          " ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
+          ",height=" + std::to_string(eye_h) +
+          " ! glcolorconvert ! gtkglsink name=__left_eye_sink__"
+          " sync=false force-aspect-ratio=false";
+
+      // Replace the existing glimages branch in left_chain.
+      // The existing branch starts with " __left_out__. ! queue max-size-buffers=1 leaky=downstream"
+      // and ends with "gtkglsink name=__left_eye_sink__ sync=false force-aspect-ratio=false"
+      const std::string old_left_eye_branch_start =
+          " __left_out__. ! queue max-size-buffers=1 leaky=downstream";
+      auto pos = left_chain.find(old_left_eye_branch_start);
+      if (pos != std::string::npos) {
+        // Find end of that branch (up to the unixfd branches or end of string)
+        // The branch ends at the next " __left_out__. ! " or end of string
+        const std::string next_branch = " __left_out__. ! queue max-size-buffers=2";
+        auto end_pos = left_chain.find(next_branch, pos + 1);
+        left_chain = left_chain.substr(0, pos) + left_eye_branch +
+                     (end_pos != std::string::npos ? left_chain.substr(end_pos) : "");
+      }
+    }
+
+    // --- Right chain with per-eye compositor (glimages path) ---
+    if (has_glimages) {
+      std::string right_eye_branch =
+          " __right_out__. ! queue max-size-buffers=1 leaky=downstream";
+      if (include_overlay) {
+        right_eye_branch += " ! videoconvert ! cairooverlay name=right_overlay";
+      }
+      right_eye_branch += " ! glupload ! __right_eye_comp__.sink_0";
+      append_extra_branches(right_eye_branch, "__right_eye_comp__", 1, false);
+      right_eye_branch += " " + make_eye_mixer_desc("__right_eye_comp__", eye_w, 0);
+      right_eye_branch +=
+          " ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
+          ",height=" + std::to_string(eye_h) +
+          " ! glcolorconvert ! gtkglsink name=__right_eye_sink__"
+          " sync=false force-aspect-ratio=false";
+
+      const std::string old_right_eye_branch_start =
+          " __right_out__. ! queue max-size-buffers=1 leaky=downstream";
+      auto pos = right_chain.find(old_right_eye_branch_start);
+      if (pos != std::string::npos) {
+        const std::string next_branch = " __right_out__. ! queue max-size-buffers=2";
+        auto end_pos = right_chain.find(next_branch, pos + 1);
+        right_chain = right_chain.substr(0, pos) + right_eye_branch +
+                      (end_pos != std::string::npos ? right_chain.substr(end_pos) : "");
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Output (combined stereo) chain
+  // -----------------------------------------------------------------------
   std::string output_chain =
       "glvideomixer name=mix background=1 sink_0::xpos=" +
       std::to_string(left_xpos) +
@@ -576,12 +774,79 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     if (has_glimage) {
       output_chain +=
           "__stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
-      if (include_overlay) {
-        output_chain += " ! gldownload ! videoconvert ! cairooverlay "
-                        "name=stereo_overlay ! glupload";
+      if (has_extra) {
+        if (include_overlay) {
+          output_chain +=
+              " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay"
+              " ! videoconvert ! tee name=__stereo_split__ ";
+        } else {
+          output_chain += " ! gldownload ! videoconvert ! tee name=__stereo_split__ ";
+        }
+        // Left half (crops out the right half)
+        output_chain += " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
+                        " ! videocrop left=0 right=" + std::to_string(eye_w) + " top=0 bottom=0 "
+                        " ! glupload ! __stereo_comp__.sink_0 ";
+        // Right half (crops out the left half)
+        output_chain += " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
+                        " ! videocrop left=" + std::to_string(eye_w) + " right=0 top=0 bottom=0 "
+                        " ! glupload ! __stereo_comp__.sink_1 ";
+        // Extra branches — left half uses sink_2..n_extra_streams+1
+        // and right half uses sink_n_extra_streams+2..2*n_extra_streams+1
+        append_extra_branches(output_chain, "__stereo_comp__", 2, true);
+        append_extra_branches(output_chain, "__stereo_comp__", 2 + n_extra_streams, false);
+
+        // Build the combined stereo compositor description
+        std::string comp_desc =
+            "glvideomixer name=__stereo_comp__ background=1"
+            " sink_0::xpos=0 sink_0::ypos=0"
+            " sink_0::width=" + std::to_string(eye_w) +
+            " sink_0::height=" + std::to_string(stereo_h) +
+            " sink_0::sizing-policy=1"
+            " sink_1::xpos=" + std::to_string(eye_w) + " sink_1::ypos=0"
+            " sink_1::width=" + std::to_string(eye_w) +
+            " sink_1::height=" + std::to_string(stereo_h) +
+            " sink_1::sizing-policy=1";
+        for (int i = 0; i < n_extra_streams; ++i) {
+          // Left half
+          comp_desc +=
+              " sink_" + std::to_string(2 + i) +
+              "::xpos=" + std::to_string(i * (slot_w + gap_px)) +
+              " sink_" + std::to_string(2 + i) +
+              "::ypos=" + std::to_string(stereo_h + gap_px) +
+              " sink_" + std::to_string(2 + i) +
+              "::width=" + std::to_string(slot_w) +
+              " sink_" + std::to_string(2 + i) +
+              "::height=" + std::to_string(mono_h) +
+              " sink_" + std::to_string(2 + i) + "::sizing-policy=1" +
+              " sink_" + std::to_string(2 + i) + "::yalign=0.0";
+          // Right half
+          comp_desc +=
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::xpos=" + std::to_string(eye_w + i * (slot_w + gap_px)) +
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::ypos=" + std::to_string(stereo_h + gap_px) +
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::width=" + std::to_string(slot_w) +
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::height=" + std::to_string(mono_h) +
+              " sink_" + std::to_string(2 + n_extra_streams + i) + "::sizing-policy=1" +
+              " sink_" + std::to_string(2 + n_extra_streams + i) + "::yalign=0.0";
+        }
+        output_chain += " " + comp_desc;
+        output_chain +=
+            " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
+            ",height=" + std::to_string(eye_h) +
+            " ! glcolorconvert ! gtkglsink sync=false"
+            " force-aspect-ratio=false name=__stereo_sink__";
+      } else {
+        // No extra streams — original path
+        if (include_overlay) {
+          output_chain += " ! gldownload ! videoconvert ! cairooverlay "
+                          "name=stereo_overlay ! glupload";
+        }
+        output_chain += " ! glcolorconvert ! gtkglsink sync=false"
+                        " force-aspect-ratio=false name=__stereo_sink__";
       }
-      output_chain += " ! glcolorconvert ! gtkglsink sync=false "
-                      "force-aspect-ratio=false name=__stereo_sink__";
     }
 
     for (const auto &sink : stereo_unixfd_sinks) {
@@ -617,84 +882,133 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
       }
     }
   } else {
-    if (include_overlay) {
-      output_chain +=
-          " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
+    if (has_extra) {
+      // No display sink but we still compose (rare: fakesink)
+      if (include_overlay) {
+        output_chain +=
+            " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
+      }
+    } else {
+      if (include_overlay) {
+        output_chain +=
+            " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
+      }
     }
     output_chain += " ! fakesink sync=false";
   }
 
-  return left_chain + " " + right_chain + " " + output_chain;
+  return extra_chains + left_chain + " " + right_chain + " " + output_chain;
 }
 
 class ControlWindow : public Gtk::Window {
 public:
+  using RebuildCb = std::function<void(double new_scale)>;
+
   ControlWindow(std::shared_ptr<sv::OverlayState> overlay_state,
-                GstElement *pipeline)
-      : m_overlay_state(overlay_state), m_pipeline(pipeline) {
+                GstElement *pipeline,
+                const sv::AppConfig &cfg,
+                RebuildCb rebuild_cb)
+      : m_overlay_state(overlay_state), m_pipeline(pipeline),
+        m_cfg(cfg), m_rebuild_cb(std::move(rebuild_cb)) {
     set_title("dVRK Display Control");
     set_border_width(10);
-    set_default_size(250, 120);
-
     m_vbox.set_orientation(Gtk::ORIENTATION_VERTICAL);
-    m_vbox.set_spacing(10);
+    m_vbox.set_spacing(8);
     add(m_vbox);
 
     m_btn_overlay.set_label("Overlay");
     m_btn_overlay.set_active(true);
     m_btn_overlay.signal_toggled().connect(
         sigc::mem_fun(*this, &ControlWindow::on_overlay_toggled));
-    m_vbox.pack_start(m_btn_overlay);
+    m_vbox.pack_start(m_btn_overlay, Gtk::PACK_SHRINK);
 
     m_btn_fullscreen.set_label("Fullscreen");
     m_btn_fullscreen.set_active(false);
     m_btn_fullscreen.signal_toggled().connect(
         sigc::mem_fun(*this, &ControlWindow::on_fullscreen_toggled));
-    m_vbox.pack_start(m_btn_fullscreen);
+    m_vbox.pack_start(m_btn_fullscreen, Gtk::PACK_SHRINK);
+
+    if (!m_cfg.extra_streams.monos.empty() || !m_cfg.extra_streams.stereos.empty()) {
+      m_scale_label.set_text("Extra Streams");
+      m_scale_label.set_halign(Gtk::ALIGN_START);
+      m_vbox.pack_start(m_scale_label, Gtk::PACK_SHRINK);
+      
+      const int n_mono = static_cast<int>(m_cfg.extra_streams.monos.size());
+      const int n_stereo = static_cast<int>(m_cfg.extra_streams.stereos.size());
+      const int n_extra = n_mono + n_stereo;
+      const int gap = sv::AppConfig::gap_px;
+      // Calculate max useful scale (assuming 4:3 source ratio bounding the width)
+      int eye_w = m_cfg.original_width;
+      if (eye_w == 0) eye_w = 640; // fallback
+      int eye_h = m_cfg.original_height;
+      if (eye_h == 0) eye_h = 480; // fallback
+      
+      int slot_w = (eye_w - (n_extra - 1) * gap) / n_extra;
+      int max_mono_h = slot_w * 3 / 4; 
+      double max_scale = static_cast<double>(max_mono_h + gap) / eye_h;
+      max_scale = std::min(0.95, std::max(0.1, max_scale));
+
+      m_scale_slider.set_range(0.00, max_scale);
+      m_scale_slider.set_value(std::min(m_cfg.extra_streams.scale, max_scale));
+      m_scale_slider.set_digits(2);
+      m_scale_slider.set_draw_value(true);
+      m_scale_slider.set_increments(0.01, 0.05);
+      m_scale_slider.set_size_request(220, -1);
+      m_scale_slider.signal_button_release_event().connect(
+          [this](GdkEventButton *) -> bool {
+            on_scale_released();
+            return false;
+          });
+      m_vbox.pack_start(m_scale_slider, Gtk::PACK_SHRINK);
+      m_scale_visible = true;
+    }
 
     m_btn_quit.set_label("Quit");
     m_btn_quit.signal_clicked().connect(
         sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
-    m_vbox.pack_start(m_btn_quit);
+    m_vbox.pack_start(m_btn_quit, Gtk::PACK_SHRINK);
 
+    const int height = 120 + (m_scale_visible ? 60 : 0);
+    set_default_size(260, height);
     add_events(Gdk::KEY_PRESS_MASK);
-
     show_all_children();
+    setup_display_windows(pipeline);
+  }
 
+  void setup_display_windows(GstElement *pipeline) {
+    m_pipeline = pipeline;
+    m_display_windows.clear();
     const std::vector<std::string> sink_names = {
         "__left_eye_sink__", "__right_eye_sink__", "__stereo_sink__"};
-    for (const auto &name : sink_names) {
-      GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), name.c_str());
-      if (sink) {
-        GtkWidget *gtk_widget = nullptr;
-        g_object_get(sink, "widget", &gtk_widget, NULL);
-        if (gtk_widget) {
-          auto win = std::make_unique<Gtk::Window>();
-          win->add_events(Gdk::KEY_PRESS_MASK);
-          win->signal_key_press_event().connect(
-              [this](GdkEventKey *event) {
-                if ((event->state & GDK_CONTROL_MASK) && (event->keyval == GDK_KEY_q)) {
-                    on_quit_clicked();
-                    return true;
-                }
-                return false;
-              },
-              false);
-
-          win->set_title(name == "__stereo_sink__"
-                             ? "Stereo Display"
-                             : (name == "__left_eye_sink__"
-                                    ? "Left Eye Display"
-                                    : "Right Eye Display"));
-          win->set_default_size(1280, 720);
-          Gtk::Widget *mm_widget = Glib::wrap(gtk_widget);
-          win->add(*mm_widget);
-          win->show_all();
-          m_display_windows.push_back(std::make_pair(name, std::move(win)));
-          g_object_unref(gtk_widget);
-        }
-        gst_object_unref(sink);
-      }
+    for (const auto &sname : sink_names) {
+      GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), sname.c_str());
+      if (!sink) continue;
+      GtkWidget *gtk_widget = nullptr;
+      g_object_get(sink, "widget", &gtk_widget, NULL);
+      gst_object_unref(sink);
+      if (!gtk_widget) continue;
+      auto win = std::make_unique<Gtk::Window>();
+      win->add_events(Gdk::KEY_PRESS_MASK);
+      win->signal_key_press_event().connect(
+          [this](GdkEventKey *event) {
+            if ((event->state & GDK_CONTROL_MASK) &&
+                (event->keyval == GDK_KEY_q)) {
+              on_quit_clicked();
+              return true;
+            }
+            return false;
+          },
+          false);
+      win->set_title(sname == "__stereo_sink__"    ? "Stereo Display"
+                     : sname == "__left_eye_sink__" ? "Left Eye Display"
+                                                    : "Right Eye Display");
+      win->set_default_size(1280, 720);
+      Gtk::Widget *mm_widget = Glib::wrap(gtk_widget);
+      win->add(*mm_widget);
+      win->show_all();
+      if (m_btn_fullscreen.get_active()) win->fullscreen();
+      m_display_windows.push_back(std::make_pair(sname, std::move(win)));
+      g_object_unref(gtk_widget);
     }
   }
 
@@ -715,32 +1029,43 @@ protected:
   void on_fullscreen_toggled() {
     bool active = m_btn_fullscreen.get_active();
     for (auto &pair : m_display_windows) {
-      if (active)
-        pair.second->fullscreen();
-      else
-        pair.second->unfullscreen();
+      if (active) pair.second->fullscreen();
+      else        pair.second->unfullscreen();
     }
   }
 
+  void on_scale_released() {
+    if (m_rebuild_cb) m_rebuild_cb(m_scale_slider.get_value());
+  }
+
   void on_quit_clicked() {
-    if (g_app) {
-      g_app->quit();
-    }
+    if (g_app) g_app->quit();
   }
 
   std::shared_ptr<sv::OverlayState> m_overlay_state;
   GstElement *m_pipeline;
+  const sv::AppConfig &m_cfg;
+  RebuildCb m_rebuild_cb;
+  bool m_scale_visible = false;
   Gtk::Box m_vbox;
   Gtk::ToggleButton m_btn_overlay;
   Gtk::ToggleButton m_btn_fullscreen;
   Gtk::Button m_btn_quit;
+  Gtk::Label m_scale_label;
+  Gtk::Scale m_scale_slider{Gtk::ORIENTATION_HORIZONTAL};
   std::vector<std::pair<std::string, std::unique_ptr<Gtk::Window>>>
       m_display_windows;
 };
-
 } // namespace
 
 int main(int argc, char *argv[]) {
+  // gtkglsink requires OpenGL via GLX. Force the x11 GDK backend so that
+  // XWayland is used on Wayland sessions. On pure X11 this is a no-op.
+  // Users can override by setting GDK_BACKEND before launching the node.
+  if (!getenv("GDK_BACKEND")) {
+    setenv("GDK_BACKEND", "x11", 0);
+  }
+
   gst_init(&argc, &argv);
   rclcpp::init(argc, argv);
 
@@ -1149,19 +1474,18 @@ int main(int argc, char *argv[]) {
     gst_object_unref(unixfd_q);
   }
 
-  if (overlay_available) {
-    bool found_overlay = false;
+  // Helper: attach cairo overlay signals to all overlay elements in a pipeline.
+  // Used for both initial setup and after pipeline rebuild.
+  bool first_overlay_found = false;
+  auto attach_overlays = [&](GstElement *pl) {
+    if (!overlay_available) return;
     const std::vector<std::string> overlay_names = {
         "stereo_overlay", "left_overlay", "right_overlay"};
-
     for (const auto &overlay_name : overlay_names) {
       GstElement *overlay =
-          gst_bin_get_by_name(GST_BIN(pipeline), overlay_name.c_str());
-      if (overlay == nullptr) {
-        continue;
-      }
-
-      found_overlay = true;
+          gst_bin_get_by_name(GST_BIN(pl), overlay_name.c_str());
+      if (overlay == nullptr) continue;
+      first_overlay_found = true;
       g_signal_connect(overlay, "caps-changed",
                        G_CALLBACK(sv::on_overlay_caps_changed),
                        overlay_state.get());
@@ -1169,13 +1493,15 @@ int main(int argc, char *argv[]) {
                        overlay_state.get());
       gst_object_unref(overlay);
     }
+  };
 
-    if (!found_overlay) {
-      RCLCPP_WARN(node->get_logger(),
-                  "Unable to find overlay element in pipeline; dVRK status "
-                  "overlay is disabled");
-    }
+  attach_overlays(pipeline);
+  if (overlay_available && !first_overlay_found) {
+    RCLCPP_WARN(node->get_logger(),
+                "Unable to find overlay element in pipeline; dVRK status "
+                "overlay is disabled");
   }
+
 
   g_app = Gtk::Application::create("org.dvrk.display");
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
@@ -1191,7 +1517,58 @@ int main(int argc, char *argv[]) {
   (void)teleop_unselected_sub;
   (void)ecm_js_sub;
 
-  ControlWindow window(overlay_state, pipeline);
+  // Build the rebuild callback: stops old pipeline, rebuilds with new scale,
+  // restarts, and refreshes the display windows in the control window.
+  // control_window_ptr is set in signal_activate before any slider interaction.
+  ControlWindow *control_window_ptr = nullptr;
+
+  auto rebuild_pipeline = [&](double new_scale) {
+    if (!control_window_ptr) return;
+
+    RCLCPP_INFO(node->get_logger(),
+                "Rebuilding pipeline with extra_streams.scale=%.2f", new_scale);
+
+    // Stop and destroy old pipeline
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+    pipeline = nullptr;
+
+    // Update scale in config copy (cfg is a local copy in main)
+    cfg.extra_streams.scale = new_scale;
+
+    // Rebuild pipeline string
+    const std::string new_pipeline_str =
+        build_pipeline_string(cfg, overlay_available);
+
+    GError *rebuild_error = nullptr;
+    pipeline = gst_parse_launch(new_pipeline_str.c_str(), &rebuild_error);
+    if (rebuild_error != nullptr || pipeline == nullptr) {
+      RCLCPP_ERROR(node->get_logger(),
+                   "Failed to rebuild pipeline after scale change: %s",
+                   rebuild_error ? rebuild_error->message : "unknown");
+      if (rebuild_error) g_error_free(rebuild_error);
+      if (pipeline) { gst_object_unref(pipeline); pipeline = nullptr; }
+      return;
+    }
+
+    // Re-attach bus watcher
+    GstBus *new_bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
+    gst_bus_add_watch(new_bus, on_bus_message, nullptr);
+    gst_object_unref(new_bus);
+
+    // Re-attach overlay signals
+    attach_overlays(pipeline);
+
+    // Refresh display windows in the control window
+    control_window_ptr->setup_display_windows(pipeline);
+
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    RCLCPP_INFO(node->get_logger(), "Pipeline restarted with new scale");
+  };
+
+  ControlWindow window(overlay_state, pipeline, cfg,
+                       [&rebuild_pipeline](double s) { rebuild_pipeline(s); });
+  control_window_ptr = &window;
 
   for (const auto &sink : app_cfg.unixfd_sinks) {
     const std::string socket_path =
@@ -1217,12 +1594,15 @@ int main(int argc, char *argv[]) {
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline on quit: %s",
               pipeline_string.c_str());
 
-  gst_element_send_event(pipeline, gst_event_new_eos());
-  gst_element_set_state(pipeline, GST_STATE_NULL);
-  gst_object_unref(pipeline);
+  if (pipeline) {
+    gst_element_send_event(pipeline, gst_event_new_eos());
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+  }
 
   g_app.reset();
 
   rclcpp::shutdown();
   return 0;
 }
+
