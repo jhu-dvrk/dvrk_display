@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include <data_collection/gst_utils.hpp>
 #include "overlay.hpp"
 #include <data_collection/cpu_timestamp_meta.hpp>
 
@@ -37,6 +38,8 @@ namespace {
 
 struct CommandLineOptions {
   std::string config_file;
+  bool dump_dot = false;
+  GstDebugGraphDetails dot_flags = GST_DEBUG_GRAPH_SHOW_ALL;
 };
 
 
@@ -49,7 +52,9 @@ static Glib::RefPtr<Gtk::Application> g_app;
 
 
 void print_usage(const char *executable) {
-  std::cerr << "Usage: " << executable << " -c <config.json>" << std::endl;
+  std::cerr << "Usage: " << executable << " -c <config.json> [-g <0|1|2|3>]"
+            << std::endl;
+  dc::print_dot_usage();
 }
 
 bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
@@ -65,6 +70,10 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
       }
       options.config_file = argv[++i];
       seen_config = true;
+      continue;
+    }
+
+    if (dc::parse_dot_arguments(i, argc, argv, options.dump_dot, options.dot_flags)) {
       continue;
     }
 
@@ -247,12 +256,15 @@ gboolean on_ros_spin(gpointer user_data) {
   return G_SOURCE_CONTINUE;
 }
 
-gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
+gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
   if (msg == nullptr) {
     return G_SOURCE_CONTINUE;
   }
 
+  auto *node = static_cast<rclcpp::Node *>(user_data);
+
   if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+    RCLCPP_INFO(node->get_logger(), "GStreamer bus: received EOS");
     if (g_app) {
       g_app->quit();
     }
@@ -260,10 +272,9 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
     GError *err = nullptr;
     gchar *dbg = nullptr;
     gst_message_parse_error(msg, &err, &dbg);
-    std::cerr << "GStreamer error: " << (err ? err->message : "unknown")
-              << std::endl;
+    RCLCPP_ERROR(node->get_logger(), "GStreamer error: %s", (err ? err->message : "unknown"));
     if (dbg != nullptr) {
-      std::cerr << "Debug details: " << dbg << std::endl;
+      RCLCPP_ERROR(node->get_logger(), "Debug details: %s", dbg);
       g_free(dbg);
     }
     if (err != nullptr) {
@@ -283,38 +294,54 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
 std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_available) {
   std::string p;
 
-  p += app_cfg.stream + " ";
-  p += "! tee name=__raw_out__ ";
-
+  int raw_unixfd_count = 0;
   for (const auto &sink : app_cfg.unixfd_sinks) {
-    if (sink.stream == "raw") {
-      p += "__raw_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
-      std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
-      p += "unixfdsink socket-path=" + sock + " ";
-      if (!sink.name.empty()) {
-        p += "name=" + sink.name + " ";
-      }
-      p += "sync=false async=false ";
-    }
+    if (sink.stream == "raw") raw_unixfd_count++;
   }
 
-  p += "__raw_out__. ! queue max-size-buffers=2 leaky=downstream ! videoconvert ! ";
+  p += app_cfg.stream + " ";
+  
+  if (raw_unixfd_count > 0) {
+    p += "! tee name=__raw_out__ ";
+    for (const auto &sink : app_cfg.unixfd_sinks) {
+      if (sink.stream == "raw") {
+        p += "__raw_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
+        std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
+        p += "unixfdsink socket-path=" + sock + " ";
+        if (!sink.name.empty()) {
+          p += "name=" + sink.name + " ";
+        }
+        p += "sync=false async=false ";
+      }
+    }
+    p += "__raw_out__. ! queue max-size-buffers=2 leaky=downstream ! ";
+  }
+  
+  p += "! videoconvert ! ";
 
   if (overlay_available) {
     p += "cairooverlay name=mono_overlay ! videoconvert ! ";
   }
 
-  p += "tee name=__overlay_out__ ";
-
+  int overlay_unixfd_count = 0;
   for (const auto &sink : app_cfg.unixfd_sinks) {
-    if (sink.stream == "overlay") {
-      p += "__overlay_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
-      std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
-      p += "unixfdsink socket-path=" + sock + " ";
-      if (!sink.name.empty()) {
-        p += "name=" + sink.name + " ";
+    if (sink.stream == "overlay") overlay_unixfd_count++;
+  }
+
+  int total_overlay_branches = overlay_unixfd_count + app_cfg.sinks.size();
+
+  if (total_overlay_branches > 1) {
+    p += "tee name=__overlay_out__ ";
+    for (const auto &sink : app_cfg.unixfd_sinks) {
+      if (sink.stream == "overlay") {
+        p += "__overlay_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
+        std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
+        p += "unixfdsink socket-path=" + sock + " ";
+        if (!sink.name.empty()) {
+          p += "name=" + sink.name + " ";
+        }
+        p += "sync=false async=false ";
       }
-      p += "sync=false async=false ";
     }
   }
 
@@ -331,7 +358,11 @@ std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_ava
          // use gtkglsink instead to embed
          s = "glupload ! glcolorconvert ! gtkglsink name=__mono_sink__ sync=false force-aspect-ratio=false";
     }
-    p += "__overlay_out__. ! queue max-size-buffers=2 leaky=downstream ! " + s + " ";
+    
+    if (total_overlay_branches > 1) {
+      p += "__overlay_out__. ! queue max-size-buffers=2 leaky=downstream ! ";
+    }
+    p += s + " ";
   }
 
   return p;
@@ -830,7 +861,7 @@ int main(int argc, char *argv[]) {
   }
 
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-  gst_bus_add_watch(bus, on_bus_message, nullptr);
+  gst_bus_add_watch(bus, on_bus_message, node.get());
   gst_object_unref(bus);
 
   GstElement *unixfd_q =
@@ -873,7 +904,7 @@ int main(int argc, char *argv[]) {
   }
 
 
-  g_app = Gtk::Application::create("org.dvrk.display");
+  g_app = Gtk::Application::create("org.dvrk.display.mono." + app_cfg.name, Gio::APPLICATION_NON_UNIQUE);
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
   g_unix_signal_add(SIGTERM, on_sigint, nullptr);
   g_timeout_add(20, on_ros_spin, node.get());
@@ -923,7 +954,7 @@ int main(int argc, char *argv[]) {
 
     // Re-attach bus watcher
     GstBus *new_bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-    gst_bus_add_watch(new_bus, on_bus_message, nullptr);
+    gst_bus_add_watch(new_bus, on_bus_message, node.get());
     gst_object_unref(new_bus);
 
     // Re-attach overlay signals
@@ -959,6 +990,11 @@ int main(int argc, char *argv[]) {
   gst_element_set_state(pipeline, GST_STATE_PLAYING);
   RCLCPP_INFO(node->get_logger(), "Mono display pipeline started");
 
+  if (options.dump_dot) {
+    dc::dump_dot(pipeline, "mono_pipeline.dot", options.dot_flags);
+  }
+
+  window.show();
   g_app->run(window);
 
   RCLCPP_INFO(node->get_logger(), "Mono display pipeline on quit: %s",

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include <data_collection/gst_utils.hpp>
 #include "overlay.hpp"
 #include <data_collection/cpu_timestamp_meta.hpp>
 
@@ -37,6 +38,8 @@ namespace {
 
 struct CommandLineOptions {
   std::string config_file;
+  bool dump_dot = false;
+  GstDebugGraphDetails dot_flags = GST_DEBUG_GRAPH_SHOW_ALL;
 };
 
 struct CropValues {
@@ -128,7 +131,9 @@ CropValues compute_eye_crop(const int working_w, const int working_h,
 }
 
 void print_usage(const char *executable) {
-  std::cerr << "Usage: " << executable << " -c <config.json>" << std::endl;
+  std::cerr << "Usage: " << executable << " -c <config.json> [-g <0|1|2|3>]"
+            << std::endl;
+  dc::print_dot_usage();
 }
 
 bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
@@ -144,6 +149,10 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
       }
       options.config_file = argv[++i];
       seen_config = true;
+      continue;
+    }
+
+    if (dc::parse_dot_arguments(i, argc, argv, options.dump_dot, options.dot_flags)) {
       continue;
     }
 
@@ -326,12 +335,15 @@ gboolean on_ros_spin(gpointer user_data) {
   return G_SOURCE_CONTINUE;
 }
 
-gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
+gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
   if (msg == nullptr) {
     return G_SOURCE_CONTINUE;
   }
 
+  auto *node = static_cast<rclcpp::Node *>(user_data);
+
   if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+    RCLCPP_INFO(node->get_logger(), "GStreamer bus: received EOS");
     if (g_app) {
       g_app->quit();
     }
@@ -339,10 +351,9 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer) {
     GError *err = nullptr;
     gchar *dbg = nullptr;
     gst_message_parse_error(msg, &err, &dbg);
-    std::cerr << "GStreamer error: " << (err ? err->message : "unknown")
-              << std::endl;
+    RCLCPP_ERROR(node->get_logger(), "GStreamer error: %s", (err ? err->message : "unknown"));
     if (dbg != nullptr) {
-      std::cerr << "Debug details: " << dbg << std::endl;
+      RCLCPP_ERROR(node->get_logger(), "Debug details: %s", dbg);
       g_free(dbg);
     }
     if (err != nullptr) {
@@ -766,14 +777,19 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     }
   }
 
-  const bool need_stereo_tee =
-      has_glimage || !stereo_unixfd_sinks.empty() || !overlay_unixfd_sinks.empty();
 
-  if (need_stereo_tee) {
-    output_chain += " ! tee name=__stereo_out__ ";
+  int stereo_branches = (has_glimage ? 1 : 0) + stereo_unixfd_sinks.size() + (overlay_unixfd_sinks.empty() ? 0 : 1);
+
+
+  if (stereo_branches > 0) {
+    if (stereo_branches > 1) {
+      output_chain += " ! tee name=__stereo_out__ ";
+    }
+    
     if (has_glimage) {
-      output_chain +=
-          "__stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
+      if (stereo_branches > 1) {
+        output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
+      }
       if (has_extra) {
         if (include_overlay) {
           output_chain +=
@@ -853,10 +869,12 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
       const std::string socket_path =
           resolve_unixfd_socket_path(stereo.name, sink);
       const std::string unixfd_upload_chain = get_unixfd_upload_chain();
-      output_chain += " __stereo_out__. ! queue max-size-buffers=2 "
-                      "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                      " ! " +
-                      unixfd_upload_chain +
+      if (stereo_branches > 1) {
+        output_chain += " __stereo_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+      } else {
+        output_chain += " ! ";
+      }
+      output_chain += unixfd_upload_chain +
                       " ! queue name=__unixfd_ts_q__ max-size-buffers=2 "
                       "max-size-time=0 max-size-bytes=0 leaky=downstream"
                       " ! unixfdsink socket-path=" +
@@ -864,21 +882,28 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     }
 
     if (!overlay_unixfd_sinks.empty()) {
-      output_chain +=
-          " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream"
-          " ! gldownload ! videoconvert ! cairooverlay "
-          "name=stereo_overlay_unixfd ! tee name=__overlay_out__ ";
+      if (stereo_branches > 1) {
+        output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream ! ";
+      } else {
+        output_chain += " ! ";
+      }
+      output_chain += "gldownload ! videoconvert ! cairooverlay name=stereo_overlay_unixfd ";
+      
+      if (overlay_unixfd_sinks.size() > 1) {
+        output_chain += "! tee name=__overlay_out__ ";
+      }
+      
       for (const auto &sink : overlay_unixfd_sinks) {
         const std::string socket_path =
             resolve_unixfd_socket_path(stereo.name, sink);
-        output_chain +=
-            " __overlay_out__. ! queue max-size-buffers=2 "
-            "max-size-time=0 max-size-bytes=0 leaky=downstream"
-            " ! videoconvert ! video/x-raw,format=I420"
-            " ! queue name=__unixfd_ts_q_overlay__ max-size-buffers=2 "
-            "max-size-time=0 max-size-bytes=0 leaky=downstream"
-            " ! unixfdsink socket-path=" +
-            socket_path + " sync=true async=false";
+        if (overlay_unixfd_sinks.size() > 1) {
+          output_chain += " __overlay_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+        }
+        output_chain += "videoconvert ! video/x-raw,format=I420"
+                        " ! queue name=__unixfd_ts_q_overlay__ max-size-buffers=2 "
+                        "max-size-time=0 max-size-bytes=0 leaky=downstream"
+                        " ! unixfdsink socket-path=" +
+                        socket_path + " sync=true async=false";
       }
     }
   } else {
@@ -1459,7 +1484,7 @@ int main(int argc, char *argv[]) {
   }
 
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-  gst_bus_add_watch(bus, on_bus_message, nullptr);
+  gst_bus_add_watch(bus, on_bus_message, node.get());
   gst_object_unref(bus);
 
   GstElement *unixfd_q =
@@ -1503,7 +1528,7 @@ int main(int argc, char *argv[]) {
   }
 
 
-  g_app = Gtk::Application::create("org.dvrk.display");
+  g_app = Gtk::Application::create("org.dvrk.display.stereo." + app_cfg.name, Gio::APPLICATION_NON_UNIQUE);
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
   g_unix_signal_add(SIGTERM, on_sigint, nullptr);
   g_timeout_add(20, on_ros_spin, node.get());
@@ -1553,7 +1578,7 @@ int main(int argc, char *argv[]) {
 
     // Re-attach bus watcher
     GstBus *new_bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-    gst_bus_add_watch(new_bus, on_bus_message, nullptr);
+    gst_bus_add_watch(new_bus, on_bus_message, node.get());
     gst_object_unref(new_bus);
 
     // Re-attach overlay signals
@@ -1589,6 +1614,11 @@ int main(int argc, char *argv[]) {
   gst_element_set_state(pipeline, GST_STATE_PLAYING);
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline started");
 
+  if (options.dump_dot) {
+    dc::dump_dot(pipeline, "stereo_pipeline.dot", options.dot_flags);
+  }
+
+  window.show();
   g_app->run(window);
 
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline on quit: %s",
