@@ -43,6 +43,19 @@ OverlayView overlay_view_from_element(const GstElement *element) {
   return OverlayView::Stereo;
 }
 
+std::string overlay_name_from_element(const GstElement *element) {
+  if (element == nullptr) {
+    return "stereo_overlay";
+  }
+
+  const char *element_name = GST_OBJECT_NAME(element);
+  if (element_name == nullptr) {
+    return "stereo_overlay";
+  }
+
+  return std::string(element_name);
+}
+
 int get_joy_state(const sensor_msgs::msg::Joy &msg) {
   bool has_two = false;
   for (const int value : msg.buttons) {
@@ -310,7 +323,8 @@ void on_ecm_measured_js(const sensor_msgs::msg::JointState::SharedPtr msg,
   overlay_state->camera_roll = msg->position[3];
 }
 
-void on_overlay_caps_changed(GstElement *, GstCaps *caps, gpointer user_data) {
+void on_overlay_caps_changed(GstElement *overlay, GstCaps *caps,
+                             gpointer user_data) {
   if (caps == nullptr || user_data == nullptr) {
     return;
   }
@@ -320,10 +334,21 @@ void on_overlay_caps_changed(GstElement *, GstCaps *caps, gpointer user_data) {
     return;
   }
 
+  std::string overlay_name = "stereo_overlay";
+  if (overlay != nullptr) {
+    const char *name = GST_OBJECT_NAME(overlay);
+    if (name != nullptr) {
+      overlay_name = name;
+    }
+  }
+
   auto *overlay_state = static_cast<OverlayState *>(user_data);
   std::scoped_lock<std::mutex> lock(overlay_state->mutex);
-  overlay_state->frame_width = static_cast<int>(video_info.width);
-  overlay_state->frame_height = static_cast<int>(video_info.height);
+  const int width = static_cast<int>(video_info.width);
+  const int height = static_cast<int>(video_info.height);
+  overlay_state->frame_width = width;
+  overlay_state->frame_height = height;
+  overlay_state->overlay_frame_size_by_name[overlay_name] = {width, height};
 }
 
 void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
@@ -361,8 +386,16 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
     operator_present_status = overlay_state->operator_present.present
                                   ? overlay_state->operator_present.get_status()
                                   : 0;
-    frame_width = overlay_state->frame_width;
-    frame_height = overlay_state->frame_height;
+    const std::string overlay_name = overlay_name_from_element(overlay);
+    auto size_it =
+        overlay_state->overlay_frame_size_by_name.find(overlay_name);
+    if (size_it != overlay_state->overlay_frame_size_by_name.end()) {
+      frame_width = size_it->second.first;
+      frame_height = size_it->second.second;
+    } else {
+      frame_width = overlay_state->frame_width;
+      frame_height = overlay_state->frame_height;
+    }
     overlay_alpha = overlay_state->overlay_alpha;
     display_horizontal_offset_px = overlay_state->display_horizontal_offset_px;
     camera_roll = overlay_state->camera_roll;

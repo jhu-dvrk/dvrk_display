@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <string>
 #include <chrono>
 
@@ -64,6 +65,7 @@ struct OverlayState {
     bool overlay_enabled = true;
     double overlay_alpha = 0.7;
     int display_horizontal_offset_px = 0;
+    std::unordered_map<std::string, std::pair<int, int>> overlay_frame_size_by_name;
     double camera_roll = 0.0;
     std::unordered_map<std::string, TeleopIndicator> teleop_indicators;
     std::unordered_map<std::string, ArmOverlayInfo> arm_info;
