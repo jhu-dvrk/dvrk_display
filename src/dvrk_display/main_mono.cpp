@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "display_output_panel.hpp"
 #include <data_collection/gst_utils.hpp>
 #include "overlay.hpp"
 #include <data_collection/cpu_timestamp_meta.hpp>
@@ -377,7 +378,8 @@ public:
                 const sv::AppConfig &cfg,
                 RebuildCb rebuild_cb)
       : m_overlay_state(overlay_state), m_pipeline(pipeline),
-        m_cfg(cfg), m_rebuild_cb(std::move(rebuild_cb)) {
+        m_cfg(cfg), m_rebuild_cb(std::move(rebuild_cb)),
+        m_display_outputs(cfg, "mono", [this]() { on_quit_clicked(); }) {
     set_title("dVRK Display Control");
     set_border_width(10);
     m_vbox.set_orientation(Gtk::ORIENTATION_VERTICAL);
@@ -389,19 +391,14 @@ public:
     m_btn_overlay.signal_toggled().connect(
         sigc::mem_fun(*this, &ControlWindow::on_overlay_toggled));
     m_vbox.pack_start(m_btn_overlay, Gtk::PACK_SHRINK);
-
-    m_btn_fullscreen.set_label("Fullscreen");
-    m_btn_fullscreen.set_active(false);
-    m_btn_fullscreen.signal_toggled().connect(
-        sigc::mem_fun(*this, &ControlWindow::on_fullscreen_toggled));
-    m_vbox.pack_start(m_btn_fullscreen, Gtk::PACK_SHRINK);
+    m_vbox.pack_start(m_display_outputs.widget(), Gtk::PACK_SHRINK);
 
     m_btn_quit.set_label("Quit");
     m_btn_quit.signal_clicked().connect(
         sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
     m_vbox.pack_start(m_btn_quit, Gtk::PACK_SHRINK);
 
-    set_default_size(260, 120);
+    set_default_size(260, 180);
     add_events(Gdk::KEY_PRESS_MASK);
     show_all_children();
     setup_display_windows(pipeline);
@@ -409,8 +406,8 @@ public:
 
   void setup_display_windows(GstElement *pipeline) {
     m_pipeline = pipeline;
-    m_display_windows.clear();
-    
+    std::vector<sv::DisplayOutputPanel::SinkDescriptor> sinks;
+
     GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "__mono_sink__");
     if (!sink) return;
     
@@ -418,28 +415,18 @@ public:
     g_object_get(sink, "widget", &gtk_widget, NULL);
     gst_object_unref(sink);
     if (!gtk_widget) return;
-    
-    auto win = std::make_unique<Gtk::Window>();
-    win->add_events(Gdk::KEY_PRESS_MASK);
-    win->signal_key_press_event().connect(
-        [this](GdkEventKey *event) {
-          if ((event->state & GDK_CONTROL_MASK) &&
-              (event->keyval == GDK_KEY_q)) {
-            on_quit_clicked();
-            return true;
-          }
-          return false;
-        },
-        false);
-    win->set_title(m_cfg.name + " (Mono)");
-    win->set_default_size(m_cfg.original_width > 0 ? m_cfg.original_width : 640,
-                          m_cfg.original_height > 0 ? m_cfg.original_height : 480);
-    Gtk::Widget *mm_widget = Glib::wrap(gtk_widget);
-    win->add(*mm_widget);
-    win->show_all();
-    if (m_btn_fullscreen.get_active()) win->fullscreen();
-    m_display_windows.push_back(std::make_pair("mono", std::move(win)));
-    g_object_unref(gtk_widget);
+
+    sv::DisplayOutputPanel::SinkDescriptor desc;
+    desc.sink_name = "__mono_sink__";
+    desc.label = "Mono";
+    desc.window_title = m_cfg.name + " (Mono)";
+    desc.default_width = m_cfg.original_width > 0 ? m_cfg.original_width : 640;
+    desc.default_height = m_cfg.original_height > 0 ? m_cfg.original_height : 480;
+    desc.gtk_widget = gtk_widget;
+    sinks.push_back(std::move(desc));
+
+    m_display_outputs.rebuild(sinks);
+    show_all_children();
   }
 
 protected:
@@ -456,14 +443,6 @@ protected:
     m_overlay_state->overlay_enabled = m_btn_overlay.get_active();
   }
 
-  void on_fullscreen_toggled() {
-    bool active = m_btn_fullscreen.get_active();
-    for (auto &pair : m_display_windows) {
-      if (active) pair.second->fullscreen();
-      else        pair.second->unfullscreen();
-    }
-  }
-
   void on_quit_clicked() {
     if (g_app) g_app->quit();
   }
@@ -474,10 +453,8 @@ protected:
   RebuildCb m_rebuild_cb;
   Gtk::Box m_vbox;
   Gtk::ToggleButton m_btn_overlay;
-  Gtk::ToggleButton m_btn_fullscreen;
   Gtk::Button m_btn_quit;
-  std::vector<std::pair<std::string, std::unique_ptr<Gtk::Window>>>
-      m_display_windows;
+  sv::DisplayOutputPanel m_display_outputs;
 };
 } // namespace
 int main(int argc, char *argv[]) {
@@ -1011,4 +988,3 @@ int main(int argc, char *argv[]) {
   rclcpp::shutdown();
   return 0;
 }
-

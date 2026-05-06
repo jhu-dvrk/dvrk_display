@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "display_output_panel.hpp"
 #include <data_collection/gst_utils.hpp>
 #include "overlay.hpp"
 #include <data_collection/cpu_timestamp_meta.hpp>
@@ -957,7 +958,8 @@ public:
                 const sv::AppConfig &cfg,
                 RebuildCb rebuild_cb)
       : m_overlay_state(overlay_state), m_pipeline(pipeline),
-        m_cfg(cfg), m_rebuild_cb(std::move(rebuild_cb)) {
+        m_cfg(cfg), m_rebuild_cb(std::move(rebuild_cb)),
+        m_display_outputs(cfg, "stereo", [this]() { on_quit_clicked(); }) {
     set_title("dVRK Display Control");
     set_border_width(10);
     m_vbox.set_orientation(Gtk::ORIENTATION_VERTICAL);
@@ -969,12 +971,7 @@ public:
     m_btn_overlay.signal_toggled().connect(
         sigc::mem_fun(*this, &ControlWindow::on_overlay_toggled));
     m_vbox.pack_start(m_btn_overlay, Gtk::PACK_SHRINK);
-
-    m_btn_fullscreen.set_label("Fullscreen");
-    m_btn_fullscreen.set_active(false);
-    m_btn_fullscreen.signal_toggled().connect(
-        sigc::mem_fun(*this, &ControlWindow::on_fullscreen_toggled));
-    m_vbox.pack_start(m_btn_fullscreen, Gtk::PACK_SHRINK);
+    m_vbox.pack_start(m_display_outputs.widget(), Gtk::PACK_SHRINK);
 
     if (!m_cfg.extra_streams.monos.empty() || !m_cfg.extra_streams.stereos.empty()) {
       m_scale_label.set_text("Extra Streams");
@@ -1016,7 +1013,7 @@ public:
         sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
     m_vbox.pack_start(m_btn_quit, Gtk::PACK_SHRINK);
 
-    const int height = 120 + (m_scale_visible ? 60 : 0);
+    const int height = 180 + (m_scale_visible ? 60 : 0);
     set_default_size(260, height);
     add_events(Gdk::KEY_PRESS_MASK);
     show_all_children();
@@ -1025,7 +1022,7 @@ public:
 
   void setup_display_windows(GstElement *pipeline) {
     m_pipeline = pipeline;
-    m_display_windows.clear();
+    std::vector<sv::DisplayOutputPanel::SinkDescriptor> sinks;
     const std::vector<std::string> sink_names = {
         "__left_eye_sink__", "__right_eye_sink__", "__stereo_sink__"};
     for (const auto &sname : sink_names) {
@@ -1035,29 +1032,21 @@ public:
       g_object_get(sink, "widget", &gtk_widget, NULL);
       gst_object_unref(sink);
       if (!gtk_widget) continue;
-      auto win = std::make_unique<Gtk::Window>();
-      win->add_events(Gdk::KEY_PRESS_MASK);
-      win->signal_key_press_event().connect(
-          [this](GdkEventKey *event) {
-            if ((event->state & GDK_CONTROL_MASK) &&
-                (event->keyval == GDK_KEY_q)) {
-              on_quit_clicked();
-              return true;
-            }
-            return false;
-          },
-          false);
-      win->set_title(sname == "__stereo_sink__"    ? "Stereo Display"
-                     : sname == "__left_eye_sink__" ? "Left Eye Display"
-                                                    : "Right Eye Display");
-      win->set_default_size(1280, 720);
-      Gtk::Widget *mm_widget = Glib::wrap(gtk_widget);
-      win->add(*mm_widget);
-      win->show_all();
-      if (m_btn_fullscreen.get_active()) win->fullscreen();
-      m_display_windows.push_back(std::make_pair(sname, std::move(win)));
-      g_object_unref(gtk_widget);
+      sv::DisplayOutputPanel::SinkDescriptor desc;
+      desc.sink_name = sname;
+      desc.label = sname == "__stereo_sink__"    ? "Stereo"
+                   : sname == "__left_eye_sink__" ? "Left Eye"
+                                                  : "Right Eye";
+      desc.window_title = sname == "__stereo_sink__"    ? "Stereo Display"
+                          : sname == "__left_eye_sink__" ? "Left Eye Display"
+                                                         : "Right Eye Display";
+      desc.default_width = 1280;
+      desc.default_height = 720;
+      desc.gtk_widget = gtk_widget;
+      sinks.push_back(std::move(desc));
     }
+    m_display_outputs.rebuild(sinks);
+    show_all_children();
   }
 
 protected:
@@ -1072,14 +1061,6 @@ protected:
   void on_overlay_toggled() {
     std::scoped_lock<std::mutex> lock(m_overlay_state->mutex);
     m_overlay_state->overlay_enabled = m_btn_overlay.get_active();
-  }
-
-  void on_fullscreen_toggled() {
-    bool active = m_btn_fullscreen.get_active();
-    for (auto &pair : m_display_windows) {
-      if (active) pair.second->fullscreen();
-      else        pair.second->unfullscreen();
-    }
   }
 
   void on_scale_released() {
@@ -1097,12 +1078,10 @@ protected:
   bool m_scale_visible = false;
   Gtk::Box m_vbox;
   Gtk::ToggleButton m_btn_overlay;
-  Gtk::ToggleButton m_btn_fullscreen;
   Gtk::Button m_btn_quit;
   Gtk::Label m_scale_label;
   Gtk::Scale m_scale_slider{Gtk::ORIENTATION_HORIZONTAL};
-  std::vector<std::pair<std::string, std::unique_ptr<Gtk::Window>>>
-      m_display_windows;
+  sv::DisplayOutputPanel m_display_outputs;
 };
 } // namespace
 
@@ -1667,4 +1646,3 @@ int main(int argc, char *argv[]) {
   rclcpp::shutdown();
   return 0;
 }
-
