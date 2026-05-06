@@ -366,6 +366,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
   int frame_height = 0;
   double overlay_alpha = 0.7;
   int display_horizontal_offset_px = 0;
+  bool show_grid = false;
   double camera_roll = 0.0;
   std::unordered_map<std::string, ArmOverlayInfo> arm_info;
   std::vector<TeleopIndicator> left_teleops;
@@ -398,6 +399,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
     }
     overlay_alpha = overlay_state->overlay_alpha;
     display_horizontal_offset_px = overlay_state->display_horizontal_offset_px;
+    show_grid = overlay_state->show_grid;
     camera_roll = overlay_state->camera_roll;
     arm_info = overlay_state->arm_info;
 
@@ -440,6 +442,58 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
 
   const OverlayTheme theme(image_scale);
 
+  // Draw calibration grid (same pattern as the calibration script)
+  if (show_grid) {
+    static const double k_grid_colors[12][3] = {
+        {1.0, 0.20, 0.20}, {0.20, 1.0, 0.20}, {0.20, 0.20, 1.0}, {1.0, 1.0, 0.20},
+        {1.0, 0.20, 1.0}, {0.20, 1.0, 1.0}, {1.0, 0.60, 0.20}, {0.60, 0.20, 1.0},
+        {0.20, 0.60, 0.20}, {1.0, 0.40, 0.40}, {0.40, 0.80, 1.0}, {1.0, 0.80, 0.40},
+    };
+    constexpr int grid_rows = 3;
+    constexpr int grid_cols = 4;
+    const double sq = frame_height * 0.05;
+    const double span_w = eye_width * 0.8;
+    const double span_h = frame_height * 0.8;
+    const double pad_x = (span_w - grid_cols * sq) / (grid_cols - 1);
+    const double pad_y = (span_h - grid_rows * sq) / (grid_rows - 1);
+    const double grid_w = grid_cols * sq + (grid_cols - 1) * pad_x;
+    const double grid_h = grid_rows * sq + (grid_rows - 1) * pad_y;
+    const double circle_r = frame_height * 0.4;
+    const double cy_mid = frame_height * 0.5;
+    const int n_eyes = is_stereo_layout ? 2 : 1;
+    for (int eye_idx = 0; eye_idx < n_eyes; ++eye_idx) {
+      double cx;
+      if (is_stereo_layout) {
+        const double off =
+            (eye_idx == 0)
+                ? -static_cast<double>(display_horizontal_offset_px) / 2.0
+                : static_cast<double>(display_horizontal_offset_px) / 2.0;
+        cx = eye_width * (static_cast<double>(eye_idx) + 0.5) + off;
+      } else {
+        cx = static_cast<double>(frame_width) * 0.5;
+      }
+      // White circle for aspect ratio calibration
+      cairo_new_path(cr);
+      cairo_arc(cr, cx, cy_mid, circle_r, 0.0, 2.0 * M_PI);
+      cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+      cairo_set_line_width(cr, 4.0);
+      cairo_stroke(cr);
+      // Colored squares grid
+      const double start_x = cx - grid_w * 0.5;
+      const double start_y = cy_mid - grid_h * 0.5;
+      for (int r = 0; r < grid_rows; ++r) {
+        for (int c = 0; c < grid_cols; ++c) {
+          const double x = start_x + c * (sq + pad_x);
+          const double y = start_y + r * (sq + pad_y);
+          const auto &col = k_grid_colors[r * grid_cols + c];
+          cairo_set_source_rgba(cr, col[0], col[1], col[2], 1.0);
+          cairo_rectangle(cr, x, y, sq, sq);
+          cairo_fill(cr);
+        }
+      }
+    }
+  }
+
   // Draw background strips
   set_source_rgba(cr, theme.bottom_bar_bg, 1.0);
   // Bottom strip (full width)
@@ -464,8 +518,8 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
                        theme.radius, overlay_alpha, theme);
 
     const double right_baseline_cx =
-        eye_width + (eye_width / 2.0) +
-        static_cast<double>(display_horizontal_offset_px) / 2.0;
+      eye_width + (eye_width / 2.0) +
+      static_cast<double>(display_horizontal_offset_px) / 2.0;
     const double right_cx = right_baseline_cx;
     draw_status_circle(cr, clutch_status,
                        right_cx - pedal_offset * horizontal_ui_scale, cy,

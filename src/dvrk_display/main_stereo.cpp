@@ -38,6 +38,7 @@ namespace {
 
 struct CommandLineOptions {
   std::string config_file;
+  bool show_grid = false;
   bool dump_dot = false;
   GstDebugGraphDetails dot_flags = GST_DEBUG_GRAPH_SHOW_ALL;
 };
@@ -131,7 +132,9 @@ CropValues compute_eye_crop(const int working_w, const int working_h,
 }
 
 void print_usage(const char *executable) {
-  std::cerr << "Usage: " << executable << " -c <config.json> [-g <0|1|2|3>]"
+  std::cerr << "Usage: " << executable
+            << " -c <config.json> [--grid] [-g <0|1|2|3>]" << std::endl;
+  std::cerr << "  --grid   Display calibration grid overlay for display alignment"
             << std::endl;
   dc::print_dot_usage();
 }
@@ -149,6 +152,11 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
       }
       options.config_file = argv[++i];
       seen_config = true;
+      continue;
+    }
+
+    if (arg == "--grid") {
+      options.show_grid = true;
       continue;
     }
 
@@ -550,18 +558,30 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     right_chain += " ! glupload ! mix.sink_1";
   }
 
+  // The display_horizontal_offset_px was calibrated on crop-sized frames.
+  // When preserve_size=true the video is upscaled from crop_w to original_w,
+  // so we must scale the offset by the same ratio to preserve the intended
+  // angular disparity on the display.
+  const double display_offset_scale =
+      (base_crop_w > 0 && base_crop_w != eye_w)
+          ? static_cast<double>(eye_w) / static_cast<double>(base_crop_w)
+          : 1.0;
+  const int effective_display_offset = static_cast<int>(
+      std::round(static_cast<double>(stereo.display_horizontal_offset_px) *
+                 display_offset_scale));
+
   const double horizontal_ui_scale =
       (eye_w > 0) ? (static_cast<double>(eye_w) -
                      2.0 * std::abs(static_cast<double>(
-                               stereo.display_horizontal_offset_px))) /
+                               effective_display_offset))) /
                         static_cast<double>(eye_w)
                   : 1.0;
   const int shifted_eye_w = static_cast<int>(
       std::round(static_cast<double>(eye_w) * horizontal_ui_scale));
-  const int left_xpos = (eye_w / 2) - stereo.display_horizontal_offset_px / 2 -
+  const int left_xpos = (eye_w / 2) - effective_display_offset / 2 -
                         (shifted_eye_w / 2);
   const int right_xpos = eye_w + (eye_w / 2) +
-                         stereo.display_horizontal_offset_px / 2 -
+                         effective_display_offset / 2 -
                          (shifted_eye_w / 2);
 
   // -----------------------------------------------------------------------
@@ -789,6 +809,9 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     if (has_glimage) {
       if (stereo_branches > 1) {
         output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
+      } else {
+        // Preserve non-blocking behavior for the single display branch.
+        output_chain += " ! queue max-size-buffers=1 leaky=downstream";
       }
       if (has_extra) {
         if (include_overlay) {
@@ -872,7 +895,7 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
       if (stereo_branches > 1) {
         output_chain += " __stereo_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
       } else {
-        output_chain += " ! ";
+        output_chain += " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
       }
       output_chain += unixfd_upload_chain +
                       " ! queue name=__unixfd_ts_q__ max-size-buffers=2 "
@@ -885,7 +908,7 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
       if (stereo_branches > 1) {
         output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream ! ";
       } else {
-        output_chain += " ! ";
+        output_chain += " ! queue max-size-buffers=1 leaky=downstream ! ";
       }
       output_chain += "gldownload ! videoconvert ! cairooverlay name=stereo_overlay_unixfd ";
       
@@ -1170,8 +1193,17 @@ int main(int argc, char *argv[]) {
   RCLCPP_INFO(node->get_logger(), "Loaded viewer config: %s", cfg.name.c_str());
   console_name = cfg.dvrk_console_namespace;
   overlay_state->overlay_alpha = cfg.overlay_alpha;
-  overlay_state->display_horizontal_offset_px =
-      cfg.display_horizontal_offset_px;
+  overlay_state->show_grid = options.show_grid;
+  {
+    // Scale offset from crop-pixel space to original-pixel space.
+    const double offset_scale =
+        (cfg.preserve_size && cfg.crop_width > 0 && cfg.original_width > 0)
+            ? static_cast<double>(cfg.original_width) /
+                  static_cast<double>(cfg.crop_width)
+            : 1.0;
+    overlay_state->display_horizontal_offset_px = static_cast<int>(
+        std::round(cfg.display_horizontal_offset_px * offset_scale));
+  }
   const sv::AppConfig &app_cfg = cfg;
 
   if (app_cfg.left.source.empty() || app_cfg.right.source.empty()) {

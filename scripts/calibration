@@ -238,19 +238,19 @@ def ensure_config_fields(config):
     config.setdefault("type", "dd::display_config@1.0.0")
     config.setdefault("name", "dvrk_display")
     config.setdefault("dvrk_console_namespace", "console")
-    config.setdefault("original_width", 0)
-    config.setdefault("original_height", 0)
-    config.setdefault("crop_width", 0)
-    config.setdefault("crop_height", 0)
-    config.setdefault("horizontal_shift_px", 0)
-    config.setdefault("vertical_shift_px", 0)
     config.setdefault("display_horizontal_offset_px", 0)
-    config.setdefault("left", "")
-    config.setdefault("right", "")
     config.setdefault("sinks", ["glimage"])
-    config.setdefault("left_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
-    config.setdefault("right_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     config.setdefault("preserve_size", True)
+    cam = config.setdefault("camera", {})
+    sz = cam.setdefault("size", {})
+    sz.setdefault("width", 0)
+    sz.setdefault("height", 0)
+    lft = cam.setdefault("left", {})
+    lft.setdefault("stream", "")
+    lft.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
+    rgt = cam.setdefault("right", {})
+    rgt.setdefault("stream", "")
+    rgt.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     return config
 
 
@@ -263,19 +263,14 @@ def load_or_create(path: Path):
         "type": "dd::display_config@1.0.0",
         "name": "dvrk_display",
         "dvrk_console_namespace": "console",
-        "original_width": 0,
-        "original_height": 0,
-        "crop_width": 0,
-        "crop_height": 0,
-        "horizontal_shift_px": 0,
-        "vertical_shift_px": 0,
+        "camera": {
+            "size": {"width": 0, "height": 0},
+            "left": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+            "right": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+        },
         "display_horizontal_offset_px": 0,
-        "left": "",
-        "right": "",
         "sinks": ["glimage"],
         "preserve_size": True,
-        "left_color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0},
-        "right_color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0},
     }
 
 
@@ -296,33 +291,36 @@ def parse_args():
 
 def apply_stream_overrides(config, args):
     if args.left is not None:
-        config["left"] = args.left
+        config.setdefault("camera", {}).setdefault("left", {})["stream"] = args.left
     if args.right is not None:
-        config["right"] = args.right
+        config.setdefault("camera", {}).setdefault("right", {})["stream"] = args.right
 
 
 def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, display_horizontal_offset, left_color, right_color):
     config["type"] = "dd::display_config@1.0.0"
     config.setdefault("name", "dvrk_display")
-
-    config["left"] = left
-    config["right"] = right
-    config["original_width"] = int(original_w)
-    config["original_height"] = int(original_h)
-    config["crop_width"] = int(crop_w)
-    config["crop_height"] = int(crop_h)
-    config["horizontal_shift_px"] = int(horizontal_shift)
-    config["vertical_shift_px"] = int(vertical_shift)
     config["display_horizontal_offset_px"] = int(display_horizontal_offset)
-    config["left_color"] = left_color
-    config["right_color"] = right_color
+
+    cam = config.setdefault("camera", {})
+    cam["size"] = {"width": int(original_w), "height": int(original_h)}
+    cam["left"] = {"stream": left, "color": left_color}
+    cam["right"] = {"stream": right, "color": right_color}
+    if int(crop_w) != int(original_w) or int(crop_h) != int(original_h):
+        cam["crop"] = {"width": int(crop_w), "height": int(crop_h)}
+    else:
+        cam.pop("crop", None)
+    if int(horizontal_shift) != 0 or int(vertical_shift) != 0:
+        cam["alignment"] = {"horizontal_shift_px": int(horizontal_shift), "vertical_shift_px": int(vertical_shift)}
+    else:
+        cam.pop("alignment", None)
 
 
 def interactive_tune(config, split_mode=False, psm_name=None):
-    left = config.get("left", "").strip()
-    right = config.get("right", "").strip()
+    cam_cfg = config.get("camera", {})
+    left = cam_cfg.get("left", {}).get("stream", "").strip()
+    right = cam_cfg.get("right", {}).get("stream", "").strip()
     if not left or not right:
-        raise RuntimeError("Both left and right are required")
+        raise RuntimeError("Both camera.left.stream and camera.right.stream are required")
 
     ral = None
     arm = None
@@ -363,8 +361,8 @@ def interactive_tune(config, split_mode=False, psm_name=None):
         t_osc = threading.Thread(target=oscillation_thread, daemon=True)
         t_osc.start()
 
-    left_cap = open_capture("left", left_stream)
-    right_cap = open_capture("right", right_stream)
+    left_cap = open_capture("left", left)
+    right_cap = open_capture("right", right)
 
     ok_left, left_frame = left_cap.read()
     ok_right, right_frame = right_cap.read()
@@ -376,14 +374,16 @@ def interactive_tune(config, split_mode=False, psm_name=None):
 
     detected_w = min(left_w, right_w)
     detected_h = min(left_h, right_h)
-    original_w = int(config.get("original_width", 0)) or detected_w
-    original_h = int(config.get("original_height", 0)) or detected_h
+    cam_size = cam_cfg.get("size", {})
+    original_w = int(cam_size.get("width", 0)) or detected_w
+    original_h = int(cam_size.get("height", 0)) or detected_h
 
     original_w = min(original_w, detected_w)
     original_h = min(original_h, detected_h)
 
-    configured_crop_w = int(config.get("crop_width", 0))
-    configured_crop_h = int(config.get("crop_height", 0))
+    cam_crop = cam_cfg.get("crop", {})
+    configured_crop_w = int(cam_crop.get("width", 0))
+    configured_crop_h = int(cam_crop.get("height", 0))
     if configured_crop_w > 0:
         resize_percent = compute_resize_percent_from_crop(original_w, configured_crop_w)
     elif configured_crop_h > 0:
@@ -395,8 +395,9 @@ def interactive_tune(config, split_mode=False, psm_name=None):
     if configured_crop_w > 0:
         width_offset = configured_crop_w - crop_w
 
-    horizontal_shift = int(config.get("horizontal_shift_px", 0))
-    vertical_shift = int(config.get("vertical_shift_px", 0))
+    cam_align = cam_cfg.get("alignment", {})
+    horizontal_shift = int(cam_align.get("horizontal_shift_px", 0))
+    vertical_shift = int(cam_align.get("vertical_shift_px", 0))
     display_horizontal_offset = int(config.get("display_horizontal_offset_px", 0))
     show_grid = False
     horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
@@ -404,8 +405,9 @@ def interactive_tune(config, split_mode=False, psm_name=None):
     
     color_calibration_modes = ["none", "left_ref", "right_ref", "average"]
     current_color_mode_idx = 0
-    left_color_calibration = config.get("left_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
-    right_color_calibration = config.get("right_color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
+    _neutral_color = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}
+    left_color_calibration = cam_cfg.get("left", {}).get("color", dict(_neutral_color))
+    right_color_calibration = cam_cfg.get("right", {}).get("color", dict(_neutral_color))
     
     right_active = right_color_calibration.get("brightness", 0.0) != 0.0 or right_color_calibration.get("contrast", 1.0) != 1.0 or right_color_calibration.get("saturation", 1.0) != 1.0
     left_active = left_color_calibration.get("brightness", 0.0) != 0.0 or left_color_calibration.get("contrast", 1.0) != 1.0 or left_color_calibration.get("saturation", 1.0) != 1.0
