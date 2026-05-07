@@ -2,10 +2,6 @@
   "type": "dd::display_config@1.0.0",
   "name": "stereo_complex",
   "dvrk_console_namespace": "console",
-  "original_width": 640,
-  "original_height": 480,
-  "crop_width": 640,
-  "crop_height": 480,
   "sinks": ["glimage", "glimages"],
   "overlay_alpha": 0.5,
   "extra_streams": {
@@ -14,6 +10,20 @@
     ],
     "scale": 0.3
   },
-  "left": "videotestsrc pattern=white ! video/x-raw,width=640,height=480,framerate=30/1",
-  "right": "videotestsrc pattern=black ! video/x-raw,width=640,height=480,framerate=30/1"
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "videotestsrc pattern=white ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "right": {
+      "stream": "videotestsrc pattern=black ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "crop": {
+      "width": 640,
+      "height": 480
+    }
+  }
 }

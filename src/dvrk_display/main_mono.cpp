@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <pwd.h>
 #include <string>
 #include <unistd.h>
@@ -46,6 +47,16 @@ struct CommandLineOptions {
 
 static Glib::RefPtr<Gtk::Application> g_app;
 
+struct FrameTimestampState {
+  std::mutex mutex;
+  gint64 mono_source_ts = 0;
+};
+
+enum class MonoTimestampProbeKind {
+  Source,
+  RawUnixfd,
+  OverlayUnixfd,
+};
 
 
 
@@ -222,10 +233,9 @@ std::string get_unixfd_upload_chain() {
   return "gldownload ! videoconvert ! video/x-raw,format=I420";
 }
 
-GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
-                                            gpointer user_data) {
+GstPadProbeReturn frame_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
+                                           gpointer user_data) {
   (void)pad;
-  (void)user_data;
   if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!gst_buffer_is_writable(buf)) {
@@ -233,11 +243,83 @@ GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
       GST_PAD_PROBE_INFO_DATA(info) = buf;
     }
 
-    if (!gst_buffer_get_custom_meta(buf, DC_CPU_TIMESTAMP_META_NAME)) {
-      dc_buffer_add_cpu_timestamp(buf, dc_clock_realtime_ns());
+    auto *state = static_cast<FrameTimestampState *>(user_data);
+    if (state == nullptr) {
+      return GST_PAD_PROBE_OK;
     }
+
+    DcFrameTimestamps timestamps = dc_buffer_get_frame_timestamps(buf);
+    const gint64 now = dc_clock_realtime_ns();
+
+    MonoTimestampProbeKind kind = MonoTimestampProbeKind::RawUnixfd;
+    GstElement *parent = gst_pad_get_parent_element(pad);
+    if (parent != nullptr) {
+      const char *parent_name = GST_OBJECT_NAME(parent);
+      if (parent_name != nullptr) {
+        const std::string name(parent_name);
+        if (name == "__mono_src_ts_q__") {
+          kind = MonoTimestampProbeKind::Source;
+        } else if (name.rfind("__mono_overlay_unixfd_ts_q", 0) == 0) {
+          kind = MonoTimestampProbeKind::OverlayUnixfd;
+        }
+      }
+      gst_object_unref(parent);
+    }
+
+    {
+      std::scoped_lock<std::mutex> lock(state->mutex);
+      if (kind == MonoTimestampProbeKind::Source) {
+        timestamps.mono_source_ts = now;
+        state->mono_source_ts = now;
+      } else {
+        if (timestamps.mono_source_ts == 0) {
+          timestamps.mono_source_ts = state->mono_source_ts;
+        }
+        if (kind == MonoTimestampProbeKind::OverlayUnixfd) {
+          timestamps.overlay_output_ts = now;
+        }
+      }
+    }
+    dc_buffer_set_frame_timestamps(buf, timestamps);
   }
   return GST_PAD_PROBE_OK;
+}
+
+void add_timestamp_probe(GstElement *pipeline, const std::string &element_name,
+                         FrameTimestampState *timestamp_state) {
+  GstElement *element =
+      gst_bin_get_by_name(GST_BIN(pipeline), element_name.c_str());
+  if (!element) {
+    return;
+  }
+  GstPad *pad = gst_element_get_static_pad(element, "src");
+  if (pad != nullptr) {
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                      frame_timestamp_probe_cb, timestamp_state, nullptr);
+    gst_object_unref(pad);
+  }
+  gst_object_unref(element);
+}
+
+void attach_timestamp_probes(GstElement *pipeline, const sv::AppConfig &cfg,
+                             FrameTimestampState *timestamp_state) {
+  add_timestamp_probe(pipeline, "__mono_src_ts_q__", timestamp_state);
+
+  int raw_index = 0;
+  int overlay_index = 0;
+  for (const auto &sink : cfg.unixfd_sinks) {
+    if (sink.stream == "raw") {
+      add_timestamp_probe(
+          pipeline,
+          "__mono_raw_unixfd_ts_q" + std::to_string(raw_index++) + "__",
+          timestamp_state);
+    } else if (sink.stream == "overlay") {
+      add_timestamp_probe(
+          pipeline,
+          "__mono_overlay_unixfd_ts_q" + std::to_string(overlay_index++) + "__",
+          timestamp_state);
+    }
+  }
 }
 
 gboolean on_sigint(gpointer) {
@@ -300,13 +382,20 @@ std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_ava
     if (sink.stream == "raw") raw_unixfd_count++;
   }
 
-  p += app_cfg.stream + " ";
+  p += app_cfg.stream +
+       " ! queue name=__mono_src_ts_q__ max-size-buffers=8 "
+       "max-size-time=0 max-size-bytes=0 leaky=downstream ";
   
   if (raw_unixfd_count > 0) {
     p += "! tee name=__raw_out__ ";
+    int raw_index = 0;
     for (const auto &sink : app_cfg.unixfd_sinks) {
       if (sink.stream == "raw") {
-        p += "__raw_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
+        p += "__raw_out__. ! queue max-size-buffers=1 leaky=downstream ! "
+             "videoconvert ! video/x-raw,format=I420 ! queue name="
+             "__mono_raw_unixfd_ts_q" + std::to_string(raw_index++) +
+             "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+             "leaky=downstream ! ";
         std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
         p += "unixfdsink socket-path=" + sock + " ";
         if (!sink.name.empty()) {
@@ -315,7 +404,7 @@ std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_ava
         p += "sync=false async=false ";
       }
     }
-    p += "__raw_out__. ! queue max-size-buffers=2 leaky=downstream ! ";
+    p += "__raw_out__. ! queue max-size-buffers=2 leaky=downstream ";
   }
   
   p += "! videoconvert ! ";
@@ -333,9 +422,14 @@ std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_ava
 
   if (total_overlay_branches > 1) {
     p += "tee name=__overlay_out__ ";
+    int overlay_index = 0;
     for (const auto &sink : app_cfg.unixfd_sinks) {
       if (sink.stream == "overlay") {
-        p += "__overlay_out__. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! ";
+        p += "__overlay_out__. ! queue max-size-buffers=1 leaky=downstream ! "
+             "videoconvert ! video/x-raw,format=I420 ! queue name="
+             "__mono_overlay_unixfd_ts_q" + std::to_string(overlay_index++) +
+             "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+             "leaky=downstream ! ";
         std::string sock = resolve_unixfd_socket_path(app_cfg.name, sink);
         p += "unixfdsink socket-path=" + sock + " ";
         if (!sink.name.empty()) {
@@ -343,6 +437,22 @@ std::string build_pipeline_string(const sv::AppConfig &app_cfg, bool overlay_ava
         }
         p += "sync=false async=false ";
       }
+    }
+  } else if (overlay_unixfd_count == 1 && app_cfg.sinks.empty()) {
+    const auto sink_it =
+        std::find_if(app_cfg.unixfd_sinks.begin(), app_cfg.unixfd_sinks.end(),
+                     [](const sv::UnixfdSinkConfig &sink) {
+                       return sink.stream == "overlay";
+                     });
+    if (sink_it != app_cfg.unixfd_sinks.end()) {
+      p += "queue name=__mono_overlay_unixfd_ts_q0__ max-size-buffers=2 "
+           "max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+      const std::string sock = resolve_unixfd_socket_path(app_cfg.name, *sink_it);
+      p += "unixfdsink socket-path=" + sock + " ";
+      if (!sink_it->name.empty()) {
+        p += "name=" + sink_it->name + " ";
+      }
+      p += "sync=false async=false ";
     }
   }
 
@@ -841,17 +951,8 @@ int main(int argc, char *argv[]) {
   gst_bus_add_watch(bus, on_bus_message, node.get());
   gst_object_unref(bus);
 
-  GstElement *unixfd_q =
-      gst_bin_get_by_name(GST_BIN(pipeline), "__unixfd_ts_q__");
-  if (unixfd_q) {
-    GstPad *pad = gst_element_get_static_pad(unixfd_q, "src");
-    if (pad != nullptr) {
-      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
-                        source_timestamp_probe_cb, nullptr, nullptr);
-      gst_object_unref(pad);
-    }
-    gst_object_unref(unixfd_q);
-  }
+  FrameTimestampState timestamp_state;
+  attach_timestamp_probes(pipeline, cfg, &timestamp_state);
 
   // Helper: attach cairo overlay signals to all overlay elements in a pipeline.
   // Used for both initial setup and after pipeline rebuild.
@@ -936,6 +1037,7 @@ int main(int argc, char *argv[]) {
 
     // Re-attach overlay signals
     attach_overlays(pipeline);
+    attach_timestamp_probes(pipeline, cfg, &timestamp_state);
 
     // Refresh display windows in the control window
     control_window_ptr->setup_display_windows(pipeline);

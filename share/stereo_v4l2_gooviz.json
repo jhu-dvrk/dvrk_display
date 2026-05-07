@@ -6,6 +6,11 @@
   "sinks": [
     "glimage"
   ],
+  "unixfdsinks": [
+    {
+      "stream": "stereo"
+    }
+  ],
   "camera": {
     "size": {
       "width": 640,

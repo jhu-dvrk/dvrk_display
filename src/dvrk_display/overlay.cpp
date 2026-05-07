@@ -287,6 +287,7 @@ void update_button_state(const sensor_msgs::msg::Joy::SharedPtr msg,
   if (state == 1) {
     btn.active = true;
   } else if (state == 2) {
+    btn.active = false;
     btn.expiration = std::chrono::steady_clock::now() + std::chrono::seconds(1);
   } else {
     btn.active = false;

@@ -5,12 +5,6 @@
     "stereo"
   ],
   "dvrk_console_namespace": "console",
-  "original_width": 640,
-  "original_height": 480,
-  "crop_width": 640,
-  "crop_height": 480,
-  "horizontal_shift_px": 0,
-  "vertical_shift_px": 0,
   "sinks": [
     "glimage"
   ],
@@ -20,7 +14,24 @@
     ],
     "scale": 0.3
   },
-  "left_stream": "shmsrc socket-path=/tmp/dvrk_test_l ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2",
-  "right_stream": "shmsrc socket-path=/tmp/dvrk_test_r ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2"
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "shmsrc socket-path=/tmp/dvrk_test_l ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2"
+    },
+    "right": {
+      "stream": "shmsrc socket-path=/tmp/dvrk_test_r ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! queue leaky=downstream max-size-buffers=2"
+    },
+    "crop": {
+      "width": 640,
+      "height": 480
+    },
+    "alignment": {
+      "horizontal_shift_px": 0,
+      "vertical_shift_px": 0
+    }
+  }
 }
-

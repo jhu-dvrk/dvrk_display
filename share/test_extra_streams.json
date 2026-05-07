@@ -2,12 +2,6 @@
   "type": "dd::display_config@1.0.0",
   "name": "test_extra_streams",
   "dvrk_console_namespace": "console",
-  "original_width": 640,
-  "original_height": 480,
-  "crop_width": 640,
-  "crop_height": 480,
-  "horizontal_shift_px": 0,
-  "vertical_shift_px": 0,
   "sinks": [
     "glimage"
   ],
@@ -23,6 +17,24 @@
     ],
     "scale": 0.3
   },
-  "left": "videotestsrc pattern=snow is-live=true ! video/x-raw,width=640,height=480,framerate=30/1",
-  "right": "videotestsrc pattern=pinwheel is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "videotestsrc pattern=snow is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "right": {
+      "stream": "videotestsrc pattern=pinwheel is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "crop": {
+      "width": 640,
+      "height": 480
+    },
+    "alignment": {
+      "horizontal_shift_px": 0,
+      "vertical_shift_px": 0
+    }
+  }
 }

@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <pwd.h>
 #include <string>
 #include <unistd.h>
@@ -52,6 +53,13 @@ struct CropValues {
 };
 
 static Glib::RefPtr<Gtk::Application> g_app;
+
+struct FrameTimestampState {
+  std::mutex mutex;
+  gint64 left_source_ts = 0;
+  gint64 right_source_ts = 0;
+  gint64 stereo_output_ts = 0;
+};
 
 int clip_int(const int value, const int min_value, const int max_value) {
   return std::max(min_value, std::min(max_value, value));
@@ -309,10 +317,9 @@ std::string get_unixfd_upload_chain() {
   return "gldownload ! videoconvert ! video/x-raw,format=I420";
 }
 
-GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
-                                            gpointer user_data) {
+GstPadProbeReturn frame_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
+                                           gpointer user_data) {
   (void)pad;
-  (void)user_data;
   if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!gst_buffer_is_writable(buf)) {
@@ -320,11 +327,105 @@ GstPadProbeReturn source_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
       GST_PAD_PROBE_INFO_DATA(info) = buf;
     }
 
-    if (!gst_buffer_get_custom_meta(buf, DC_CPU_TIMESTAMP_META_NAME)) {
-      dc_buffer_add_cpu_timestamp(buf, dc_clock_realtime_ns());
+    auto *state = static_cast<FrameTimestampState *>(user_data);
+    if (state == nullptr) {
+      return GST_PAD_PROBE_OK;
     }
+
+    std::string element_name;
+    GstElement *parent = gst_pad_get_parent_element(pad);
+    if (parent != nullptr) {
+      const char *name = GST_OBJECT_NAME(parent);
+      if (name != nullptr) {
+        element_name = name;
+      }
+      gst_object_unref(parent);
+    }
+
+    DcFrameTimestamps timestamps = dc_buffer_get_frame_timestamps(buf);
+    const gint64 now = dc_clock_realtime_ns();
+
+    {
+      std::scoped_lock<std::mutex> lock(state->mutex);
+      if (element_name == "__left_src_q__") {
+        timestamps.left_source_ts = now;
+        state->left_source_ts = now;
+      } else if (element_name == "__right_src_q__") {
+        timestamps.right_source_ts = now;
+        state->right_source_ts = now;
+      } else {
+        if (timestamps.left_source_ts == 0) {
+          timestamps.left_source_ts = state->left_source_ts;
+        }
+        if (timestamps.right_source_ts == 0) {
+          timestamps.right_source_ts = state->right_source_ts;
+        }
+
+        if (element_name.rfind("__stereo_unixfd_ts_q", 0) == 0 ||
+            element_name == "__stereo_overlay_input_ts_q__") {
+          timestamps.stereo_output_ts = now;
+          state->stereo_output_ts = now;
+        } else if (element_name.rfind("__overlay_unixfd_ts_q", 0) == 0) {
+          if (timestamps.stereo_output_ts == 0) {
+            timestamps.stereo_output_ts = state->stereo_output_ts;
+          }
+          timestamps.overlay_output_ts = now;
+        }
+      }
+    }
+
+    dc_buffer_set_frame_timestamps(buf, timestamps);
   }
   return GST_PAD_PROBE_OK;
+}
+
+void add_timestamp_probe(GstElement *pipeline, const std::string &element_name,
+                         FrameTimestampState *timestamp_state) {
+  GstElement *element =
+      gst_bin_get_by_name(GST_BIN(pipeline), element_name.c_str());
+  if (!element) {
+    return;
+  }
+  GstPad *pad = gst_element_get_static_pad(element, "src");
+  if (pad != nullptr) {
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                      frame_timestamp_probe_cb, timestamp_state, nullptr);
+    gst_object_unref(pad);
+  }
+  gst_object_unref(element);
+}
+
+void attach_timestamp_probes(GstElement *pipeline, const sv::AppConfig &cfg,
+                             FrameTimestampState *timestamp_state) {
+  add_timestamp_probe(pipeline, "__left_src_q__", timestamp_state);
+  add_timestamp_probe(pipeline, "__right_src_q__", timestamp_state);
+  add_timestamp_probe(pipeline, "__stereo_overlay_input_ts_q__", timestamp_state);
+
+  int left_index = 0;
+  int right_index = 0;
+  int stereo_index = 0;
+  int overlay_index = 0;
+  for (const auto &sink : cfg.unixfd_sinks) {
+    if (sink.stream == "left") {
+      add_timestamp_probe(
+          pipeline, "__left_unixfd_ts_q" + std::to_string(left_index++) + "__",
+          timestamp_state);
+    } else if (sink.stream == "right") {
+      add_timestamp_probe(
+          pipeline, "__right_unixfd_ts_q" + std::to_string(right_index++) + "__",
+          timestamp_state);
+    } else if (sink.stream == "stereo") {
+      add_timestamp_probe(
+          pipeline,
+          "__stereo_unixfd_ts_q" + std::to_string(stereo_index++) + "__",
+          timestamp_state);
+    } else if (sink.stream == "overlay") {
+      add_timestamp_probe(
+          pipeline,
+          "__overlay_unixfd_ts_q" + std::to_string(overlay_index++) + "__",
+          timestamp_state);
+    }
+  }
 }
 
 gboolean on_sigint(gpointer) {
@@ -416,6 +517,11 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     int diff_x = base_crop_w - w_c_prime;
     int diff_y = base_crop_h - h_c_prime;
 
+    // Round up to even so the resulting crop dimensions stay even (required
+    // for I420/NV12 planar formats; odd widths/heights cause chroma artifacts).
+    diff_x = (diff_x + 1) & ~1;
+    diff_y = (diff_y + 1) & ~1;
+
     aspect_crop_l = diff_x / 2;
     aspect_crop_r = diff_x - aspect_crop_l;
     aspect_crop_t = diff_y / 2;
@@ -496,15 +602,17 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
           " sync=false force-aspect-ratio=false";
     }
 
+    int left_unixfd_index = 0;
     for (const auto &sink : left_unixfd_sinks) {
       const std::string socket_path =
           resolve_unixfd_socket_path(stereo.name, sink);
       left_chain += " __left_out__. ! queue max-size-buffers=2 "
                     "max-size-time=0 max-size-bytes=0 leaky=downstream"
                     " ! videoconvert ! video/x-raw,format=I420"
-                    " ! queue name=__unixfd_ts_q_left__ max-size-buffers=2 "
-                    "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                    " ! unixfdsink socket-path=" +
+                    " ! queue name=__left_unixfd_ts_q" +
+                    std::to_string(left_unixfd_index++) +
+                    "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+                    "leaky=downstream ! unixfdsink socket-path=" +
                     socket_path + " sync=true async=false";
     }
   } else {
@@ -544,15 +652,17 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
           " sync=false force-aspect-ratio=false";
     }
 
+    int right_unixfd_index = 0;
     for (const auto &sink : right_unixfd_sinks) {
       const std::string socket_path =
           resolve_unixfd_socket_path(stereo.name, sink);
       right_chain += " __right_out__. ! queue max-size-buffers=2 "
                      "max-size-time=0 max-size-bytes=0 leaky=downstream"
                      " ! videoconvert ! video/x-raw,format=I420"
-                     " ! queue name=__unixfd_ts_q_right__ max-size-buffers=2 "
-                     "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                     " ! unixfdsink socket-path=" +
+                     " ! queue name=__right_unixfd_ts_q" +
+                     std::to_string(right_unixfd_index++) +
+                     "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+                     "leaky=downstream ! unixfdsink socket-path=" +
                      socket_path + " sync=true async=false";
     }
   } else {
@@ -889,6 +999,7 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
       }
     }
 
+    int stereo_unixfd_index = 0;
     for (const auto &sink : stereo_unixfd_sinks) {
       const std::string socket_path =
           resolve_unixfd_socket_path(stereo.name, sink);
@@ -899,17 +1010,18 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
         output_chain += " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
       }
       output_chain += unixfd_upload_chain +
-                      " ! queue name=__unixfd_ts_q__ max-size-buffers=2 "
-                      "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                      " ! unixfdsink socket-path=" +
+                      " ! queue name=__stereo_unixfd_ts_q" +
+                      std::to_string(stereo_unixfd_index++) +
+                      "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+                      "leaky=downstream ! unixfdsink socket-path=" +
                       socket_path + " sync=true async=false";
     }
 
     if (!overlay_unixfd_sinks.empty()) {
       if (stereo_branches > 1) {
-        output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream ! ";
+        output_chain += " __stereo_out__. ! queue name=__stereo_overlay_input_ts_q__ max-size-buffers=1 leaky=downstream ! ";
       } else {
-        output_chain += " ! queue max-size-buffers=1 leaky=downstream ! ";
+        output_chain += " ! queue name=__stereo_overlay_input_ts_q__ max-size-buffers=1 leaky=downstream ! ";
       }
       output_chain += "gldownload ! videoconvert ! cairooverlay name=stereo_overlay_unixfd ";
       
@@ -917,6 +1029,7 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
         output_chain += "! tee name=__overlay_out__ ";
       }
       
+      int overlay_unixfd_index = 0;
       for (const auto &sink : overlay_unixfd_sinks) {
         const std::string socket_path =
             resolve_unixfd_socket_path(stereo.name, sink);
@@ -924,9 +1037,10 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
           output_chain += " __overlay_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
         }
         output_chain += "videoconvert ! video/x-raw,format=I420"
-                        " ! queue name=__unixfd_ts_q_overlay__ max-size-buffers=2 "
-                        "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                        " ! unixfdsink socket-path=" +
+                        " ! queue name=__overlay_unixfd_ts_q" +
+                        std::to_string(overlay_unixfd_index++) +
+                        "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+                        "leaky=downstream ! unixfdsink socket-path=" +
                         socket_path + " sync=true async=false";
       }
     }
@@ -1498,17 +1612,8 @@ int main(int argc, char *argv[]) {
   gst_bus_add_watch(bus, on_bus_message, node.get());
   gst_object_unref(bus);
 
-  GstElement *unixfd_q =
-      gst_bin_get_by_name(GST_BIN(pipeline), "__unixfd_ts_q__");
-  if (unixfd_q) {
-    GstPad *pad = gst_element_get_static_pad(unixfd_q, "src");
-    if (pad != nullptr) {
-      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
-                        source_timestamp_probe_cb, nullptr, nullptr);
-      gst_object_unref(pad);
-    }
-    gst_object_unref(unixfd_q);
-  }
+  FrameTimestampState timestamp_state;
+  attach_timestamp_probes(pipeline, cfg, &timestamp_state);
 
   // Helper: attach cairo overlay signals to all overlay elements in a pipeline.
   // Used for both initial setup and after pipeline rebuild.
@@ -1594,6 +1699,7 @@ int main(int argc, char *argv[]) {
 
     // Re-attach overlay signals
     attach_overlays(pipeline);
+    attach_timestamp_probes(pipeline, cfg, &timestamp_state);
 
     // Refresh display windows in the control window
     control_window_ptr->setup_display_windows(pipeline);
