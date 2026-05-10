@@ -435,11 +435,15 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
   const double image_scale =
       std::min(eye_width, static_cast<double>(frame_height));
 
+  // horizontal_ui_scale is only meaningful for the combined stereo view where
+  // the two eye images share one frame; per-eye frames always fill the window.
   const double horizontal_ui_scale =
-      (eye_width > 0) ? (eye_width - 2.0 * std::abs(static_cast<double>(
-                                               display_horizontal_offset_px))) /
-                            eye_width
-                      : 1.0;
+      is_stereo_layout
+          ? ((eye_width > 0) ? (eye_width - 2.0 * std::abs(static_cast<double>(
+                                                    display_horizontal_offset_px))) /
+                                   eye_width
+                             : 1.0)
+          : 1.0;
 
   const OverlayTheme theme(image_scale);
 
@@ -471,7 +475,10 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
                 : static_cast<double>(display_horizontal_offset_px) / 2.0;
         cx = eye_width * (static_cast<double>(eye_idx) + 0.5) + off;
       } else {
-        cx = static_cast<double>(frame_width) * 0.5;
+        const double sign =
+            (overlay_view == OverlayView::LeftEye) ? -1.0 : 1.0;
+        cx = eye_width * 0.5 +
+             sign * static_cast<double>(display_horizontal_offset_px) / 2.0;
       }
       // White circle for aspect ratio calibration
       cairo_new_path(cr);
@@ -612,6 +619,16 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
             (eye_width * (static_cast<double>(eye_index) + 0.5)) + offset;
         draw_top_icons(eye_center_x);
       }
+    } else if (overlay_view == OverlayView::LeftEye ||
+               overlay_view == OverlayView::RightEye) {
+      // Per-eye window: apply the display offset so the icon cluster appears
+      // at the correct convergence depth.
+      const double sign =
+          (overlay_view == OverlayView::LeftEye) ? -1.0 : 1.0;
+      const double cx =
+          eye_width * 0.5 +
+          sign * static_cast<double>(display_horizontal_offset_px) / 2.0;
+      draw_top_icons(cx);
     } else {
       draw_top_icons(static_cast<double>(frame_width) / 2.0);
     }
@@ -666,6 +683,33 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
       draw_teleop_column(left_teleops, psm_left_x, true);
       draw_teleop_column(right_teleops, psm_right_x, false);
     }
+  } else if (overlay_view == OverlayView::LeftEye ||
+             overlay_view == OverlayView::RightEye) {
+    // Per-eye window: images fill the full frame (no squeezing), so place
+    // the PSM columns at the frame edges with the display-offset shift applied.
+
+    // Grey corner dot to distinguish left (top-left) from right (top-right).
+    {
+      constexpr double k_eye_dot_radius_ratio = 2.0 / 425.0;
+      const double dot_r = image_scale * k_eye_dot_radius_ratio;
+      const double dot_x = (overlay_view == OverlayView::LeftEye)
+                               ? dot_r
+                               : static_cast<double>(frame_width) - dot_r;
+      cairo_new_path(cr);
+      cairo_arc(cr, dot_x, dot_r, dot_r, 0.0, 2.0 * M_PI);
+      cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, overlay_alpha);
+      cairo_fill(cr);
+    }
+
+    const double sign =
+        (overlay_view == OverlayView::LeftEye) ? -1.0 : 1.0;
+    const double eye_cx =
+        eye_width * 0.5 +
+        sign * static_cast<double>(display_horizontal_offset_px) / 2.0;
+    const double psm_left_x  = eye_cx - eye_width * 0.5 + theme.psm_x_margin;
+    const double psm_right_x = eye_cx + eye_width * 0.5 - theme.psm_x_margin;
+    draw_teleop_column(left_teleops,  psm_left_x,  true);
+    draw_teleop_column(right_teleops, psm_right_x, false);
   } else {
     // Single-eye layout: both PSM columns shown in every eye, only corner dot
     // differs.

@@ -216,6 +216,18 @@ def crop_frame(frame, crop):
     return frame[top_crop:height - bottom_crop, left_crop:width - right_crop]
 
 
+def make_room_for_offset(original_w: int, original_h: int, resize_percent: int, width_offset: int, target_h_shift: int, target_v_shift: int) -> int:
+    while resize_percent < 200:
+        crop_w, crop_h = compute_crop_size_from_percent(original_w, original_h, resize_percent)
+        crop_w = clip_int(crop_w + width_offset, 1, original_w)
+        h_min, h_max = offset_valid_range(original_w, crop_w)
+        v_min, v_max = offset_valid_range(original_h, crop_h)
+        if h_min <= target_h_shift <= h_max and v_min <= target_v_shift <= v_max:
+            break
+        resize_percent += 1
+    return resize_percent
+
+
 def as_preview_pipeline(source_snippet: str) -> str:
     snippet = source_snippet.strip()
     if "appsink" in snippet:
@@ -586,12 +598,16 @@ def interactive_tune(config, split_mode=False, psm_name=None):
                     cv2.setWindowProperty(window_name, cv2.WND_PROP_ASPECT_RATIO, aspect)
             elif key == KEY_LEFT:
                 horizontal_shift -= 2
+                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
             elif key == KEY_RIGHT:
                 horizontal_shift += 2
+                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
             elif key == KEY_UP:
                 vertical_shift -= 2
+                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
             elif key == KEY_DOWN:
                 vertical_shift += 2
+                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
             elif key == KEY_PLUS:
                 resize_percent = clip_int(resize_percent + 1, 100, 200)
             elif key == KEY_MINUS:

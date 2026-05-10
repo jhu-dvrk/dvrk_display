@@ -92,6 +92,11 @@ public:
       g_object_unref(descriptor.gtk_widget);
     }
 
+    if (!m_sink_controls.empty()) {
+      m_monitor_poll_connection = Glib::signal_timeout().connect(
+          sigc::mem_fun(*this, &DisplayOutputPanel::poll_window_monitors), 1000);
+    }
+
     m_frame.set_visible(!m_sink_controls.empty());
     m_frame.show_all_children();
     apply_all_display_settings();
@@ -104,6 +109,7 @@ private:
     Gtk::Box *row = nullptr;
     Gtk::Label *label = nullptr;
     Gtk::ComboBoxText *monitor_combo = nullptr;
+    sigc::connection monitor_combo_connection;
     Gtk::CheckButton *fullscreen_btn = nullptr;
     std::unique_ptr<Gtk::Window> window;
   };
@@ -196,6 +202,7 @@ private:
   }
 
   void clear_ui() {
+    m_monitor_poll_connection.disconnect();
     auto children = m_sink_controls_box.get_children();
     for (auto *child : children) {
       m_sink_controls_box.remove(*child);
@@ -274,10 +281,11 @@ private:
     control.fullscreen_btn = Gtk::manage(new Gtk::CheckButton("Fullscreen"));
     control.fullscreen_btn->set_active(initial_fullscreen);
 
-    control.monitor_combo->signal_changed().connect([this, sink_name]() {
-      apply_display_selection(sink_name);
-      save_persisted_settings();
-    });
+    control.monitor_combo_connection =
+        control.monitor_combo->signal_changed().connect([this, sink_name]() {
+          apply_display_selection(sink_name);
+          save_persisted_settings();
+        });
     control.fullscreen_btn->signal_toggled().connect([this, sink_name]() {
       apply_display_selection(sink_name);
       save_persisted_settings();
@@ -361,6 +369,46 @@ private:
     }
   }
 
+  // Polls window positions every second and syncs the monitor combo when a
+  // window is dragged to a different display. Returns true to keep running.
+  bool poll_window_monitors() {
+    for (auto &control : m_sink_controls) {
+      if (!control.monitor_combo || !control.window) {
+        continue;
+      }
+      const int idx = monitor_index_for_window(*control.window);
+      if (idx >= 0 && idx != control.monitor_combo->get_active_row_number()) {
+        control.monitor_combo_connection.block();
+        control.monitor_combo->set_active(idx);
+        control.monitor_combo_connection.unblock();
+        save_persisted_settings();
+      }
+    }
+    return true;
+  }
+
+  int monitor_index_for_window(Gtk::Window &win) const {
+    auto display = Gdk::Display::get_default();
+    if (!display) {
+      return -1;
+    }
+    auto gdk_window = win.get_window();
+    if (!gdk_window) {
+      return -1;
+    }
+    auto monitor = display->get_monitor_at_window(gdk_window);
+    if (!monitor) {
+      return -1;
+    }
+    const int n = display->get_n_monitors();
+    for (int i = 0; i < n; ++i) {
+      if (display->get_monitor(i) == monitor) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   int sink_display_order(const std::string &sink_name) const {
     for (std::size_t i = 0; i < m_sink_controls.size(); ++i) {
       if (m_sink_controls[i].sink_name == sink_name) {
@@ -384,6 +432,7 @@ private:
   std::vector<std::string> m_monitor_labels;
   std::vector<SinkDisplayControl> m_sink_controls;
   SinkSettingsMap m_persisted_sink_settings;
+  sigc::connection m_monitor_poll_connection;
 };
 
 }  // namespace sv

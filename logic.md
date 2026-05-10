@@ -33,66 +33,37 @@ Calibration is a two-step process, each step producing one parameter saved to th
 
 **Goal:** Find the horizontal pixel shift that makes the stereo display present content at the depth where the surgeon's hands typically operate.
 
-**How:** The user enables the calibration grid (`g` key in the calibration tool, or `--grid` flag in the stereo program). The grid is a 3×4 array of coloured squares, centred per-eye with an offset of `±display_horizontal_offset_px/2`. Looking through the stereo display, the user moves their hand to the working depth, focuses on it, and adjusts `[`/`]` until the grid squares are fused (not doubled).
-
-**What the calibration tool does:**
-
-The grid center for each eye is placed at:
-
-```
-cx = (crop_w / 2) + sign × display_horizontal_offset_px / 2
-```
-
-where sign = −1 for left eye, +1 for right eye, and `crop_w` is the **crop-frame width** (e.g. 496 px). The grid is thus drawn directly on the cropped (non-upscaled) preview images.
+**How:** The user enables the calibration grid (`g` key). The grid is centred per-eye at `cx = (crop_w / 2) + sign × display_horizontal_offset_px / 2` (sign = −1 for left, +1 for right). The user adjusts `[`/`]` until the grid squares are fused when looking at the working depth.
 
 **What the stereo pipeline does:**
 
-- `glvideomixer` places the upscaled left eye video at `left_xpos` and the right eye at `right_xpos`:
+The display offset is applied as an additional **asymmetric crop** of each eye's video, folded into the same `videocrop` element that already carries the camera alignment crop:
 
-  ```
-  horizontal_ui_scale = (original_w − 2 × |offset|) / original_w
-  shifted_eye_w       = round(original_w × horizontal_ui_scale)
-  left_xpos           = original_w/2 − offset/2 − shifted_eye_w/2
-  right_xpos          = original_w + original_w/2 + offset/2 − shifted_eye_w/2
-  ```
+- **Left eye**: crop window shifts left by `display_horizontal_offset_px / 2` pixels (show more outer/left content, less inner/right content).
+- **Right eye**: crop window shifts right by the remaining `display_horizontal_offset_px − display_horizontal_offset_px/2` pixels.
+- Total width removed from each eye stays the same, so `videoscale` still upscales to exactly `original_w × original_h`.
+- Both eye windows are filled edge-to-edge — **no black bars, no bleed** between windows.
 
-  The video is simultaneously shifted inward and slightly compressed horizontally so that no content is clipped at the screen edge.
+The `glvideomixer` is a plain side-by-side compositor (left at `xpos=0`, right at `xpos=eye_w`, both full `eye_w` wide).
 
-- `overlay.cpp` (`on_overlay_draw`) draws HUD icons with the same formula, but in **original-pixel space**:
+**Overlay (Cairo HUD):** The display offset is applied directly to icon positions in pixel space:
+- For the combined stereo view (`glimage`): `left_cx = eye_w/2 − offset/2`, `right_cx = 3·eye_w/2 + offset/2`.
+- For per-eye windows (`glimages`): each overlay draws at `cx = eye_w/2 + sign × offset/2`.
 
-  ```
-  left_baseline_cx  = original_w/2 − display_horizontal_offset_px/2
-  right_baseline_cx = original_w + original_w/2 + display_horizontal_offset_px/2
-  ```
+**Saved as:** `display_horizontal_offset_px`
 
 ---
 
-## Known Coordinate-Space Discrepancy
+## Coordinate-Space Note
 
-**The `display_horizontal_offset_px` value is calibrated in crop-pixel space but applied in original-pixel space.**
-
-| Quantity | Calibration tool | Stereo pipeline |
-|---|---|---|
-| Eye width used for grid/video centre | `crop_w` (e.g. 496 px) | `original_w` (e.g. 640 px) |
-| Shift applied per eye | `offset / 2` px of a 496 px frame | `offset / 2` px of a 640 px frame |
-| Disparity as % of eye width | `offset / crop_w` (≈ 14.9 % for offset=74) | `offset / original_w` (≈ 11.6 %) |
-
-If the calibration window and the stereo display window are shown at the same physical size, the stereo app will produce ~22 % less angular disparity than what was calibrated. The working depth in the stereo viewer will therefore appear farther than intended.
-
-**Correct fix:** When saving `display_horizontal_offset_px` from the calibration tool, scale it by `original_w / crop_w` so that the value stored is in original-pixel space:
-
-```python
-saved_offset = int(round(display_horizontal_offset * original_w / crop_w))
-```
-
-Alternatively, store the offset as a fraction of eye width and convert to pixels in each context.
+The `display_horizontal_offset_px` is calibrated in **crop-pixel space** (the preview frames in the calibration tool are at `crop_w × crop_h`). The stereo pipeline applies the offset directly in **original-pixel space** (post-upscale crop fields). For typical zoom levels the difference is small, but for large crop ratios the offset could differ. If precise depth calibration is needed, store the offset as a fraction of eye width and convert to pixels in each context.
 
 ---
 
 ## `glimage` vs `glimages`
 
-- **`glimage`** — one GTK window shows the full `2 × original_w` side-by-side frame. A single `stereo_overlay` element draws HUD on the combined frame with the full stereo layout (left and right eye icons at different horizontal positions, producing stereo depth).
-- **`glimages`** — two GTK windows, one per eye. Each has its own `left_overlay` / `right_overlay`. Currently these overlays use `OverlayView::LeftEye` / `OverlayView::RightEye` and draw icons at the single-eye frame centre — **no display offset is applied**, so the HUD has zero disparity. This will need a fix if the per-eye overlay should appear at working depth.
+- **`glimage`** — one GTK window shows the full `2 × original_w` side-by-side frame. A single `stereo_overlay` element draws HUD on the combined frame with the full stereo layout.
+- **`glimages`** — two GTK windows, one per eye. The display offset is baked into each eye's `videocrop` window so both monitors show edge-to-edge content at the correct convergence depth. Each eye's overlay (`left_overlay` / `right_overlay`) draws icons shifted by `±offset/2` from the single-eye frame centre, matching the video depth.
 
 ---
 
