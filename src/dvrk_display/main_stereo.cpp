@@ -706,15 +706,21 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     for (int i = 0; i < n_mono; ++i) {
       extra_chains += es.monos[i] +
           " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
-          " leaky=downstream ! tee name=__extra_mono" + std::to_string(i) + "__  ";
+          " leaky=downstream"
+          " ! identity sync=true single-segment=true"
+          " ! tee name=__extra_mono" + std::to_string(i) + "__  ";
     }
     for (int i = 0; i < n_stereo; ++i) {
       extra_chains += es.stereos[i].left +
           " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
-          " leaky=downstream ! tee name=__extra_stereo_left" + std::to_string(i) + "__  ";
+          " leaky=downstream"
+          " ! identity sync=true single-segment=true"
+          " ! tee name=__extra_stereo_left" + std::to_string(i) + "__  ";
       extra_chains += es.stereos[i].right +
           " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
-          " leaky=downstream ! tee name=__extra_stereo_right" + std::to_string(i) + "__  ";
+          " leaky=downstream"
+          " ! identity sync=true single-segment=true"
+          " ! tee name=__extra_stereo_right" + std::to_string(i) + "__  ";
     }
   }
 
@@ -818,11 +824,20 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
             " sink_1::width=" + std::to_string(eye_w) +
             " sink_1::height=" + std::to_string(stereo_h) +
             " sink_1::sizing-policy=1";
+        const int disp = stereo.display_horizontal_offset_px;
+        const int disp_half_lo = disp / 2;
+        const int disp_half_hi = disp - disp_half_lo;
         for (int i = 0; i < n_extra_streams; ++i) {
+          const int base_x = i * (slot_w + gap_px);
+          const int left_x = std::max(0, std::min(eye_w - slot_w,
+                                                   base_x - disp_half_lo));
+          const int right_x = std::max(eye_w,
+                                       std::min((2 * eye_w) - slot_w,
+                                                eye_w + base_x + disp_half_hi));
           // Left half
           comp_desc +=
               " sink_" + std::to_string(2 + i) +
-              "::xpos=" + std::to_string(i * (slot_w + gap_px)) +
+              "::xpos=" + std::to_string(left_x) +
               " sink_" + std::to_string(2 + i) +
               "::ypos=" + std::to_string(stereo_h + gap_px) +
               " sink_" + std::to_string(2 + i) +
@@ -834,7 +849,7 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
           // Right half
           comp_desc +=
               " sink_" + std::to_string(2 + n_extra_streams + i) +
-              "::xpos=" + std::to_string(eye_w + i * (slot_w + gap_px)) +
+              "::xpos=" + std::to_string(right_x) +
               " sink_" + std::to_string(2 + n_extra_streams + i) +
               "::ypos=" + std::to_string(stereo_h + gap_px) +
               " sink_" + std::to_string(2 + n_extra_streams + i) +
