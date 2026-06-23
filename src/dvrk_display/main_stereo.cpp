@@ -944,6 +944,8 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
             resolve_unixfd_socket_path(stereo.name, sink);
         if (overlay_unixfd_sinks.size() > 1) {
           output_chain += " __overlay_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+        } else {
+          output_chain += " ! ";
         }
         output_chain += "videoconvert ! video/x-raw,format=I420"
                         " ! queue name=__overlay_unixfd_ts_q" +
