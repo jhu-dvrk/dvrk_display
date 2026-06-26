@@ -165,6 +165,32 @@
           "default": 0.3
         }
       }
+    },
+    "ar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "left_socket": {
+          "type": "string"
+        },
+        "right_socket": {
+          "type": "string"
+        },
+        "color_key": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        }
+      }
     }
   },
   "definitions": {

@@ -37,6 +37,16 @@ struct ExtraStreamsConfig {
     double scale = 0.3;
 };
 
+struct ARConfig {
+    bool enabled = false;
+    std::string left_socket;
+    std::string right_socket;
+    bool use_color_key = false;
+    int color_key_r = 0;
+    int color_key_g = 0;
+    int color_key_b = 0;
+};
+
 struct AppConfig {
     static constexpr int gap_px = 4;
     std::string name = "dvrk_display";
@@ -61,6 +71,7 @@ struct AppConfig {
     std::vector<std::string> sink_streams;
     std::vector<UnixfdSinkConfig> unixfd_sinks;
     ExtraStreamsConfig extra_streams;
+    ARConfig ar;
 };
 
 class Config {

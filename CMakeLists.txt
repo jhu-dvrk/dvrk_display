@@ -116,6 +116,9 @@ install(TARGETS
 
 install(PROGRAMS
   scripts/calibration
+  scripts/synthetic_source.py
+  scripts/gstreamer_ar.py
+  scripts/opencv_ar.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

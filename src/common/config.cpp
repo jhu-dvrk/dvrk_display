@@ -211,6 +211,23 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         }
     }
 
+    if (root.isMember("ar") && root["ar"].isObject()) {
+        const Json::Value& ar = root["ar"];
+        cfg.ar.enabled = ar.get("enabled", true).asBool();
+        if (ar.isMember("left_socket") && ar["left_socket"].isString()) {
+            cfg.ar.left_socket = ar["left_socket"].asString();
+        }
+        if (ar.isMember("right_socket") && ar["right_socket"].isString()) {
+            cfg.ar.right_socket = ar["right_socket"].asString();
+        }
+        if (ar.isMember("color_key") && ar["color_key"].isArray() && ar["color_key"].size() == 3) {
+            cfg.ar.use_color_key = true;
+            cfg.ar.color_key_r = ar["color_key"][0].asInt();
+            cfg.ar.color_key_g = ar["color_key"][1].asInt();
+            cfg.ar.color_key_b = ar["color_key"][2].asInt();
+        }
+    }
+
     return cfg;
 }
 

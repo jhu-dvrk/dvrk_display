@@ -9,6 +9,11 @@
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include <chrono>
+#include <deque>
+#include <iomanip>
+#include <sstream>
+
 #include <gst/video/navigation.h>
 #include <gtkmm.h>
 #include <gdk/gdkkeysyms.h>
@@ -37,6 +42,49 @@
 #include <data_collection/cpu_timestamp_meta.hpp>
 
 namespace {
+
+class FpsTracker {
+public:
+  void update() {
+    std::scoped_lock<std::mutex> lock(m_mutex);
+    m_frame_times.push_back(std::chrono::steady_clock::now());
+    m_total_count++;
+  }
+
+  double get_fps() {
+    std::scoped_lock<std::mutex> lock(m_mutex);
+    auto now = std::chrono::steady_clock::now();
+    while (!m_frame_times.empty() && now - m_frame_times.front() > std::chrono::seconds(2)) {
+      m_frame_times.pop_front();
+    }
+    if (m_frame_times.size() < 2) {
+      return 0.0;
+    }
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(m_frame_times.back() - m_frame_times.front()).count();
+    if (duration == 0) return 0.0;
+    return static_cast<double>(m_frame_times.size() - 1) / (duration / 1000.0);
+  }
+
+  uint64_t get_count() const {
+    return m_total_count;
+  }
+
+private:
+  std::mutex m_mutex;
+  std::deque<std::chrono::steady_clock::time_point> m_frame_times;
+  uint64_t m_total_count = 0;
+};
+
+static GstPadProbeReturn sink_fps_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+  (void)pad;
+  if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
+    auto *tracker = static_cast<FpsTracker *>(user_data);
+    if (tracker) {
+      tracker->update();
+    }
+  }
+  return GST_PAD_PROBE_OK;
+}
 
 struct CommandLineOptions {
   std::string config_file;
@@ -152,6 +200,10 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
   bool seen_config = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
+    if (arg == "--ros-args") {
+      break;
+    }
+
     if (arg == "-c" && i + 1 < argc) {
       if (seen_config) {
         std::cerr << "Error: multiple -c arguments are not supported; provide "
@@ -395,6 +447,43 @@ void add_timestamp_probe(GstElement *pipeline, const std::string &element_name,
   gst_object_unref(element);
 }
 
+GstPadProbeReturn ar_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+  (void)user_data;
+  if (info->type & GST_PAD_PROBE_TYPE_BUFFER) {
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!gst_buffer_is_writable(buf)) {
+      buf = gst_buffer_make_writable(buf);
+      GST_PAD_PROBE_INFO_DATA(info) = buf;
+    }
+    GstElement *element = gst_pad_get_parent_element(pad);
+    if (element) {
+      GstClockTime running_time = gst_element_get_current_running_time(element);
+      if (GST_CLOCK_TIME_IS_VALID(running_time)) {
+        GST_BUFFER_PTS(buf) = running_time;
+        GST_BUFFER_DTS(buf) = GST_CLOCK_TIME_NONE;
+      }
+      gst_object_unref(element);
+    }
+  }
+  return GST_PAD_PROBE_OK;
+}
+
+void attach_ar_timestamp_probes(GstElement *pipeline) {
+  const std::vector<std::string> names = {"left_ar_src", "right_ar_src"};
+  for (const auto &name : names) {
+    GstElement *element = gst_bin_get_by_name(GST_BIN(pipeline), name.c_str());
+    if (element) {
+      GstPad *pad = gst_element_get_static_pad(element, "src");
+      if (pad) {
+        gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                          ar_timestamp_probe_cb, nullptr, nullptr);
+        gst_object_unref(pad);
+      }
+      gst_object_unref(element);
+    }
+  }
+}
+
 void attach_timestamp_probes(GstElement *pipeline, const sv::AppConfig &cfg,
                              FrameTimestampState *timestamp_state) {
   add_timestamp_probe(pipeline, "__left_src_q__", timestamp_state);
@@ -606,7 +695,36 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
   if (need_left_tee) {
     left_chain += " ! tee name=__left_out__"
                   " __left_out__. ! queue max-size-buffers=1 leaky=downstream "
-                  "! glupload ! mix.sink_0";
+                  "! glupload";
+  } else {
+    left_chain += " ! glupload";
+  }
+
+  if (stereo.ar.enabled && !stereo.ar.left_socket.empty()) {
+    std::string left_ar_socket = stereo.ar.left_socket;
+    left_chain += " ! left_ar_mix.sink_0 ";
+    left_chain += "glvideomixer name=left_ar_mix background=1 force-live=true"
+                  " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0 sink_0::width=" + std::to_string(eye_w) +
+                  " sink_0::height=" + std::to_string(eye_h) +
+                  " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0 sink_1::width=" + std::to_string(eye_w) +
+                  " sink_1::height=" + std::to_string(eye_h) + " ";
+    std::string alpha_str = "";
+    if (stereo.ar.use_color_key) {
+      alpha_str = " ! alpha method=custom target-r=" + std::to_string(stereo.ar.color_key_r) +
+                  " target-g=" + std::to_string(stereo.ar.color_key_g) +
+                  " target-b=" + std::to_string(stereo.ar.color_key_b) + " ";
+    }
+    left_chain += "unixfdsrc name=left_ar_src socket-path=" + left_ar_socket + " do-timestamp=true"
+                  " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
+                  " ! videoconvert ! video/x-raw,format=RGBA" + alpha_str +
+                  " ! glupload ! left_ar_mix.sink_1 ";
+    left_chain += "left_ar_mix. ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
+                  ",height=" + std::to_string(eye_h) + " ! mix.sink_0";
+  } else {
+    left_chain += " ! mix.sink_0";
+  }
+
+  if (need_left_tee) {
     int left_unixfd_index = 0;
     for (const auto &sink : left_unixfd_sinks) {
       const std::string socket_path =
@@ -620,8 +738,6 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
                     "leaky=downstream ! unixfdsink socket-path=" +
                     socket_path + " sync=true async=false";
     }
-  } else {
-    left_chain += " ! glupload ! mix.sink_0";
   }
 
   std::vector<sv::UnixfdSinkConfig> right_unixfd_sinks;
@@ -645,7 +761,36 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
   if (need_right_tee) {
     right_chain += " ! tee name=__right_out__"
                    " __right_out__. ! queue max-size-buffers=1 "
-                   "leaky=downstream ! glupload ! mix.sink_1";
+                   "leaky=downstream ! glupload";
+  } else {
+    right_chain += " ! glupload";
+  }
+
+  if (stereo.ar.enabled && !stereo.ar.right_socket.empty()) {
+    std::string right_ar_socket = stereo.ar.right_socket;
+    right_chain += " ! right_ar_mix.sink_0 ";
+    right_chain += "glvideomixer name=right_ar_mix background=1 force-live=true"
+                   " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0 sink_0::width=" + std::to_string(eye_w) +
+                   " sink_0::height=" + std::to_string(eye_h) +
+                   " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0 sink_1::width=" + std::to_string(eye_w) +
+                   " sink_1::height=" + std::to_string(eye_h) + " ";
+    std::string alpha_str = "";
+    if (stereo.ar.use_color_key) {
+      alpha_str = " ! alpha method=custom target-r=" + std::to_string(stereo.ar.color_key_r) +
+                  " target-g=" + std::to_string(stereo.ar.color_key_g) +
+                  " target-b=" + std::to_string(stereo.ar.color_key_b) + " ";
+    }
+    right_chain += "unixfdsrc name=right_ar_src socket-path=" + right_ar_socket + " do-timestamp=true"
+                   " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
+                   " ! videoconvert ! video/x-raw,format=RGBA" + alpha_str +
+                   " ! glupload ! right_ar_mix.sink_1 ";
+    right_chain += "right_ar_mix. ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
+                   ",height=" + std::to_string(eye_h) + " ! mix.sink_1";
+  } else {
+    right_chain += " ! mix.sink_1";
+  }
+
+  if (need_right_tee) {
     int right_unixfd_index = 0;
     for (const auto &sink : right_unixfd_sinks) {
       const std::string socket_path =
@@ -659,8 +804,6 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
                      "leaky=downstream ! unixfdsink socket-path=" +
                      socket_path + " sync=true async=false";
     }
-  } else {
-    right_chain += " ! glupload ! mix.sink_1";
   }
 
 
@@ -991,6 +1134,12 @@ public:
     m_vbox.set_spacing(8);
     add(m_vbox);
 
+    m_fps_label.set_halign(Gtk::ALIGN_CENTER);
+    m_vbox.pack_start(m_fps_label, Gtk::PACK_SHRINK);
+
+    m_fps_timer = Glib::signal_timeout().connect(
+        sigc::mem_fun(*this, &ControlWindow::on_update_fps), 500);
+
     m_btn_overlay.set_label("Overlay");
     m_btn_overlay.set_active(true);
     m_btn_overlay.signal_toggled().connect(
@@ -999,9 +1148,9 @@ public:
     m_vbox.pack_start(m_display_outputs.widget(), Gtk::PACK_SHRINK);
 
     if (!m_cfg.extra_streams.monos.empty() || !m_cfg.extra_streams.stereos.empty()) {
-      m_scale_label.set_text("Extra Streams");
+      m_scale_label.set_text("Extra Streams:");
       m_scale_label.set_halign(Gtk::ALIGN_START);
-      m_vbox.pack_start(m_scale_label, Gtk::PACK_SHRINK);
+      m_extra_box.pack_start(m_scale_label, Gtk::PACK_SHRINK);
       
       const int n_mono = static_cast<int>(m_cfg.extra_streams.monos.size());
       const int n_stereo = static_cast<int>(m_cfg.extra_streams.stereos.size());
@@ -1023,13 +1172,14 @@ public:
       m_scale_slider.set_digits(2);
       m_scale_slider.set_draw_value(true);
       m_scale_slider.set_increments(0.01, 0.05);
-      m_scale_slider.set_size_request(220, -1);
+      m_scale_slider.set_size_request(150, -1);
       m_scale_slider.signal_button_release_event().connect(
           [this](GdkEventButton *) -> bool {
             on_scale_released();
             return false;
           });
-      m_vbox.pack_start(m_scale_slider, Gtk::PACK_SHRINK);
+      m_extra_box.pack_start(m_scale_slider, Gtk::PACK_EXPAND_WIDGET);
+      m_vbox.pack_start(m_extra_box, Gtk::PACK_SHRINK);
       m_scale_visible = true;
     }
 
@@ -1038,15 +1188,38 @@ public:
         sigc::mem_fun(*this, &ControlWindow::on_quit_clicked));
     m_vbox.pack_start(m_btn_quit, Gtk::PACK_SHRINK);
 
-    const int height = 180 + (m_scale_visible ? 60 : 0);
+    const int height = 180 + (m_scale_visible ? 35 : 0);
     set_default_size(260, height);
     add_events(Gdk::KEY_PRESS_MASK);
     show_all_children();
     setup_display_windows(pipeline);
   }
 
+  ~ControlWindow() override {
+    m_fps_timer.disconnect();
+  }
+
+  void attach_sink_probe(GstElement *pipeline, const std::string &sink_name, FpsTracker *tracker) {
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), sink_name.c_str());
+    if (sink) {
+      GstPad *pad = gst_element_get_static_pad(sink, "sink");
+      if (pad) {
+        gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                          sink_fps_probe_cb, tracker, nullptr);
+        gst_object_unref(pad);
+      }
+      gst_object_unref(sink);
+    }
+  }
+
   void setup_display_windows(GstElement *pipeline) {
     m_pipeline = pipeline;
+    
+    // Attach pad probes to measure FPS/Hz
+    attach_sink_probe(pipeline, "__left_eye_sink__", &m_left_tracker);
+    attach_sink_probe(pipeline, "__right_eye_sink__", &m_right_tracker);
+    attach_sink_probe(pipeline, "__stereo_sink__", &m_stereo_tracker);
+
     std::vector<sv::DisplayOutputPanel::SinkDescriptor> sinks;
     const std::vector<std::string> sink_names = {
         "__left_eye_sink__", "__right_eye_sink__", "__stereo_sink__"};
@@ -1096,17 +1269,56 @@ protected:
     if (g_app) g_app->quit();
   }
 
+  bool on_update_fps() {
+    std::string fps_text = "Rendering rate (CPU counters): ";
+    bool any = false;
+    
+    auto format_fps = [](double fps) -> std::string {
+      std::ostringstream ss;
+      ss << std::fixed << std::setprecision(1) << fps;
+      return ss.str();
+    };
+
+    if (m_stereo_tracker.get_count() > 0) {
+      fps_text += " Stereo: " + format_fps(m_stereo_tracker.get_fps()) + " Hz";
+      any = true;
+    }
+    if (m_left_tracker.get_count() > 0) {
+      if (any) fps_text += " |";
+      fps_text += " Left: " + format_fps(m_left_tracker.get_fps()) + " Hz";
+      any = true;
+    }
+    if (m_right_tracker.get_count() > 0) {
+      if (any) fps_text += " |";
+      fps_text += " Right: " + format_fps(m_right_tracker.get_fps()) + " Hz";
+      any = true;
+    }
+
+    if (!any) {
+      fps_text += " Waiting for active sinks...";
+    }
+    
+    m_fps_label.set_markup("<span weight='bold' size='medium'>" + fps_text + "</span>");
+    return true;
+  }
+
   std::shared_ptr<sv::OverlayState> m_overlay_state;
   GstElement *m_pipeline;
   const sv::AppConfig &m_cfg;
   RebuildCb m_rebuild_cb;
   bool m_scale_visible = false;
   Gtk::Box m_vbox;
+  Gtk::Box m_extra_box{Gtk::ORIENTATION_HORIZONTAL, 8};
   Gtk::ToggleButton m_btn_overlay;
   Gtk::Button m_btn_quit;
   Gtk::Label m_scale_label;
   Gtk::Scale m_scale_slider{Gtk::ORIENTATION_HORIZONTAL};
   sv::DisplayOutputPanel m_display_outputs;
+  Gtk::Label m_fps_label;
+  FpsTracker m_left_tracker;
+  FpsTracker m_right_tracker;
+  FpsTracker m_stereo_tracker;
+  sigc::connection m_fps_timer;
 };
 } // namespace
 
@@ -1502,6 +1714,8 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  RCLCPP_INFO(node->get_logger(), "GStreamer pipeline string:\n%s", pipeline_string.c_str());
+
   GError *error = nullptr;
   GstElement *pipeline = gst_parse_launch(pipeline_string.c_str(), &error);
   if (error != nullptr || pipeline == nullptr) {
@@ -1525,6 +1739,7 @@ int main(int argc, char *argv[]) {
 
   FrameTimestampState timestamp_state;
   attach_timestamp_probes(pipeline, cfg, &timestamp_state);
+  attach_ar_timestamp_probes(pipeline);
 
   // Helper: attach cairo overlay signals to all overlay elements in a pipeline.
   // Used for both initial setup and after pipeline rebuild.
@@ -1611,6 +1826,7 @@ int main(int argc, char *argv[]) {
     // Re-attach overlay signals
     attach_overlays(pipeline);
     attach_timestamp_probes(pipeline, cfg, &timestamp_state);
+    attach_ar_timestamp_probes(pipeline);
 
     // Refresh display windows in the control window
     control_window_ptr->setup_display_windows(pipeline);
