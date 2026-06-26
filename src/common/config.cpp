@@ -52,7 +52,7 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         return color;
     };
 
-    // ── Root-level fields (common to stereo and mono) ─────────────────────────
+    // ── Root-level fields ──────────────────────────────────────────────────────
     cfg.name = root.get("name", "dvrk_display").asString();
     if (cfg.name.empty()) cfg.name = "dvrk_display";
 
@@ -64,9 +64,6 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
 
     if (root.isMember("display_horizontal_offset_px"))
         cfg.display_horizontal_offset_px = root["display_horizontal_offset_px"].asInt();
-
-    if (root.isMember("unixfd_socket_path") && root["unixfd_socket_path"].isString())
-        cfg.unixfd_socket_path = root["unixfd_socket_path"].asString();
 
     if (root.isMember("sinks") && root["sinks"].isArray()) {
         for (const auto& item : root["sinks"]) {
@@ -100,64 +97,47 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     const Json::Value& cam = root["camera"];
     const std::string config_type = root.get("type", "").asString();
 
-    if (config_type == "dd::mono_config@1.0.0") {
-        // Mono: camera.stream (required), camera.size (optional), camera.color (optional)
-        if (!cam.isMember("stream") || !cam["stream"].isString() || cam["stream"].asString().empty())
-            throw std::runtime_error("Configuration error: Required field 'camera.stream' is missing or empty.");
-        cfg.stream = cam["stream"].asString();
+    // Stereo: camera.size (required), camera.left/right (required),
+    //         camera.crop (optional), camera.alignment (optional)
 
-        if (cam.isMember("size") && cam["size"].isObject()) {
-            const Json::Value& sz = cam["size"];
-            if (sz.isMember("width"))  cfg.original_width  = sz["width"].asInt();
-            if (sz.isMember("height")) cfg.original_height = sz["height"].asInt();
-        }
+    if (!cam.isMember("size") || !cam["size"].isObject())
+        throw std::runtime_error("Configuration error: Required field 'camera.size' is missing.");
+    const Json::Value& sz = cam["size"];
+    if (!sz.isMember("width") || !sz.isMember("height"))
+        throw std::runtime_error("Configuration error: 'camera.size' must define both 'width' and 'height'.");
+    cfg.original_width  = sz["width"].asInt();
+    cfg.original_height = sz["height"].asInt();
 
-        if (cam.isMember("color") && cam["color"].isObject())
-            cfg.left_color = parse_color(cam["color"]);
+    if (!cam.isMember("left") || !cam["left"].isObject())
+        throw std::runtime_error("Configuration error: Required field 'camera.left' is missing.");
+    const Json::Value& lft = cam["left"];
+    if (!lft.isMember("stream") || lft["stream"].asString().empty())
+        throw std::runtime_error("Configuration error: Required field 'camera.left.stream' is missing or empty.");
+    cfg.left.source = lft["stream"].asString();
+    if (lft.isMember("color") && lft["color"].isObject())
+        cfg.left_color = parse_color(lft["color"]);
 
-    } else {
-        // Stereo: camera.size (required), camera.left/right (required),
-        //         camera.crop (optional), camera.alignment (optional)
+    if (!cam.isMember("right") || !cam["right"].isObject())
+        throw std::runtime_error("Configuration error: Required field 'camera.right' is missing.");
+    const Json::Value& rgt = cam["right"];
+    if (!rgt.isMember("stream") || rgt["stream"].asString().empty())
+        throw std::runtime_error("Configuration error: Required field 'camera.right.stream' is missing or empty.");
+    cfg.right.source = rgt["stream"].asString();
+    if (rgt.isMember("color") && rgt["color"].isObject())
+        cfg.right_color = parse_color(rgt["color"]);
 
-        if (!cam.isMember("size") || !cam["size"].isObject())
-            throw std::runtime_error("Configuration error: Required field 'camera.size' is missing.");
-        const Json::Value& sz = cam["size"];
-        if (!sz.isMember("width") || !sz.isMember("height"))
-            throw std::runtime_error("Configuration error: 'camera.size' must define both 'width' and 'height'.");
-        cfg.original_width  = sz["width"].asInt();
-        cfg.original_height = sz["height"].asInt();
+    if (cam.isMember("crop") && cam["crop"].isObject()) {
+        const Json::Value& crop = cam["crop"];
+        if (crop.isMember("width"))  cfg.crop_width  = crop["width"].asInt();
+        if (crop.isMember("height")) cfg.crop_height = crop["height"].asInt();
+    }
 
-        if (!cam.isMember("left") || !cam["left"].isObject())
-            throw std::runtime_error("Configuration error: Required field 'camera.left' is missing.");
-        const Json::Value& lft = cam["left"];
-        if (!lft.isMember("stream") || lft["stream"].asString().empty())
-            throw std::runtime_error("Configuration error: Required field 'camera.left.stream' is missing or empty.");
-        cfg.left.source = lft["stream"].asString();
-        if (lft.isMember("color") && lft["color"].isObject())
-            cfg.left_color = parse_color(lft["color"]);
-
-        if (!cam.isMember("right") || !cam["right"].isObject())
-            throw std::runtime_error("Configuration error: Required field 'camera.right' is missing.");
-        const Json::Value& rgt = cam["right"];
-        if (!rgt.isMember("stream") || rgt["stream"].asString().empty())
-            throw std::runtime_error("Configuration error: Required field 'camera.right.stream' is missing or empty.");
-        cfg.right.source = rgt["stream"].asString();
-        if (rgt.isMember("color") && rgt["color"].isObject())
-            cfg.right_color = parse_color(rgt["color"]);
-
-        if (cam.isMember("crop") && cam["crop"].isObject()) {
-            const Json::Value& crop = cam["crop"];
-            if (crop.isMember("width"))  cfg.crop_width  = crop["width"].asInt();
-            if (crop.isMember("height")) cfg.crop_height = crop["height"].asInt();
-        }
-
-        if (cam.isMember("alignment") && cam["alignment"].isObject()) {
-            const Json::Value& align = cam["alignment"];
-            if (align.isMember("horizontal_shift_px"))
-                cfg.horizontal_shift_px = align["horizontal_shift_px"].asInt();
-            if (align.isMember("vertical_shift_px"))
-                cfg.vertical_shift_px = align["vertical_shift_px"].asInt();
-        }
+    if (cam.isMember("alignment") && cam["alignment"].isObject()) {
+        const Json::Value& align = cam["alignment"];
+        if (align.isMember("horizontal_shift_px"))
+            cfg.horizontal_shift_px = align["horizontal_shift_px"].asInt();
+        if (align.isMember("vertical_shift_px"))
+            cfg.vertical_shift_px = align["vertical_shift_px"].asInt();
     }
 
     if (cfg.crop_width <= 0) {

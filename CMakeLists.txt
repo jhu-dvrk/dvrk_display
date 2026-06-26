@@ -73,7 +73,7 @@ target_link_libraries(dvrk_display_overlay
   ${GTKMM_LIBRARIES}
 )
 
-set(EXECUTABLES stereo mono)
+set(EXECUTABLES stereo)
 
 foreach(exe IN LISTS EXECUTABLES)
   add_executable(${exe}
@@ -110,7 +110,6 @@ endforeach()
 
 install(TARGETS
   stereo
-  mono
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

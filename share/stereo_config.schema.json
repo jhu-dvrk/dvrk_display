@@ -127,9 +127,6 @@
       },
       "default": []
     },
-    "unixfd_socket_path": {
-      "type": "string"
-    },
     "extra_streams": {
       "type": "object",
       "additionalProperties": false,

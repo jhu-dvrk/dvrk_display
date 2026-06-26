@@ -18,7 +18,7 @@ namespace sv {
 
 namespace {
 
-enum class OverlayView { Stereo, LeftEye, RightEye, Mono };
+enum class OverlayView { Stereo, LeftEye, RightEye };
 
 OverlayView overlay_view_from_element(const GstElement *element) {
   if (element == nullptr) {
@@ -36,9 +36,6 @@ OverlayView overlay_view_from_element(const GstElement *element) {
   }
   if (name == "right_overlay") {
     return OverlayView::RightEye;
-  }
-  if (name == "mono_overlay") {
-    return OverlayView::Mono;
   }
   return OverlayView::Stereo;
 }
@@ -619,8 +616,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
             (eye_width * (static_cast<double>(eye_index) + 0.5)) + offset;
         draw_top_icons(eye_center_x);
       }
-    } else if (overlay_view == OverlayView::LeftEye ||
-               overlay_view == OverlayView::RightEye) {
+    } else {
       // Per-eye window: apply the display offset so the icon cluster appears
       // at the correct convergence depth.
       const double sign =
@@ -629,8 +625,6 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
           eye_width * 0.5 +
           sign * static_cast<double>(display_horizontal_offset_px) / 2.0;
       draw_top_icons(cx);
-    } else {
-      draw_top_icons(static_cast<double>(frame_width) / 2.0);
     }
   }
 
@@ -683,8 +677,7 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
       draw_teleop_column(left_teleops, psm_left_x, true);
       draw_teleop_column(right_teleops, psm_right_x, false);
     }
-  } else if (overlay_view == OverlayView::LeftEye ||
-             overlay_view == OverlayView::RightEye) {
+  } else {
     // Per-eye window: images fill the full frame (no squeezing), so place
     // the PSM columns at the frame edges with the display-offset shift applied.
 
@@ -710,24 +703,6 @@ void on_overlay_draw(GstElement *overlay, cairo_t *cr, guint64, guint64,
     const double psm_right_x = eye_cx + eye_width * 0.5 - theme.psm_x_margin;
     draw_teleop_column(left_teleops,  psm_left_x,  true);
     draw_teleop_column(right_teleops, psm_right_x, false);
-  } else {
-    // Single-eye layout: both PSM columns shown in every eye, only corner dot
-    // differs.
-    if (overlay_view != OverlayView::Mono) {
-      constexpr double k_eye_dot_radius_ratio = 2.0 / 425.0;
-      const double dot_r = image_scale * k_eye_dot_radius_ratio;
-      const double dot_x = overlay_view == OverlayView::LeftEye
-                               ? dot_r
-                               : static_cast<double>(frame_width) - dot_r;
-      cairo_new_path(cr);
-      cairo_arc(cr, dot_x, dot_r, dot_r, 0.0, 2.0 * M_PI);
-      cairo_set_source_rgba(cr, 0.82, 0.82, 0.82, overlay_alpha);
-      cairo_fill(cr);
-    }
-    draw_teleop_column(left_teleops, theme.psm_x_margin, true);
-    draw_teleop_column(right_teleops,
-                       static_cast<double>(frame_width) - theme.psm_x_margin,
-                       false);
   }
 }
 
