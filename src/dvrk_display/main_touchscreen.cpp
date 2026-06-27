@@ -6,20 +6,31 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <glib-unix.h>
+#include <glibmm/fileutils.h>
+#include <glibmm/keyfile.h>
+#include <glibmm/miscutils.h>
 #include <gst/gst.h>
 #include <gtkmm.h>
 #include <gdk/gdkkeysyms.h>
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
+#include <cctype>
+#include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <pwd.h>
 #include <sstream>
+#include <unistd.h>
+
+#include "config.hpp"
 
 // Configuration and State structures
 struct ArmStatus {
@@ -37,13 +48,183 @@ struct ResetState {
     std::chrono::steady_clock::time_point last_command_time;
 };
 
+struct VideoSource {
+    std::string label;
+    std::string socket_path;
+};
+
+struct TouchscreenConfig {
+    std::string name = "dvrk_display";
+    std::string console = "console";
+    std::vector<std::string> video_sources;
+};
+
+struct CommandLineOptions {
+    std::string config_file;
+    std::string console_name;
+    bool console_override = false;
+    std::vector<std::string> video_sources;
+};
+
+const char *get_username() {
+    const char *username = getenv("USER");
+    if (!username) {
+        struct passwd *pw = getpwuid(getuid());
+        username = pw ? pw->pw_name : "unknown";
+    }
+    return username;
+}
+
+std::string trim_video_source_prefix(std::string source) {
+    if (!source.empty() && source.front() == ':') {
+        source.erase(source.begin());
+    }
+    return source;
+}
+
+std::string video_source_label(const std::string& source) {
+    const std::string normalized = trim_video_source_prefix(source);
+    size_t last_slash = normalized.find_last_of('/');
+    return (last_slash == std::string::npos) ? normalized : normalized.substr(last_slash + 1);
+}
+
+std::string resolve_video_source_path(const std::string& viewer_name,
+                                      const std::string& source) {
+    const std::string normalized = trim_video_source_prefix(source);
+    if (normalized.find('/') != std::string::npos ||
+        normalized.find(".sock") != std::string::npos) {
+        return normalized;
+    }
+    return "/tmp/" + viewer_name + "_" + normalized + "_" +
+           std::string(get_username()) + ".sock";
+}
+
+VideoSource make_video_source(const std::string& viewer_name,
+                              const std::string& source) {
+    return VideoSource{video_source_label(source),
+                       resolve_video_source_path(viewer_name, source)};
+}
+
+void print_usage(const char *executable) {
+    std::cerr << "Usage: " << executable
+              << " [-c <config.json>] [-C <console>] [-s <video-source>]..."
+              << std::endl;
+    std::cerr << "  -c, --config   Touchscreen JSON config file" << std::endl;
+    std::cerr << "  -C, --console  dVRK console namespace override" << std::endl;
+    std::cerr << "  -s, --source   Video source socket path or stream name" << std::endl;
+}
+
+bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--ros-args") {
+            break;
+        }
+
+        if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
+            if (!options.config_file.empty()) {
+                std::cerr << "Error: multiple touchscreen config files are not supported."
+                          << std::endl;
+                return false;
+            }
+            options.config_file = argv[++i];
+            continue;
+        }
+
+        if ((arg == "-C" || arg == "--console") && i + 1 < argc) {
+            options.console_name = argv[++i];
+            options.console_override = true;
+            continue;
+        }
+
+        if ((arg == "-s" || arg == "--source") && i + 1 < argc) {
+            options.video_sources.push_back(argv[++i]);
+            continue;
+        }
+
+        if (arg == "-c" || arg == "--config" ||
+            arg == "-C" || arg == "--console" ||
+            arg == "-s" || arg == "--source") {
+            std::cerr << "Error: missing value for argument '" << arg << "'."
+                      << std::endl;
+            return false;
+        }
+
+        std::cerr << "Error: unknown argument '" << arg << "'." << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool load_touchscreen_config(const std::string& path, TouchscreenConfig& config) {
+    if (!std::filesystem::exists(path)) {
+        std::cerr << "Config file does not exist: " << path << std::endl;
+        return false;
+    }
+
+    Json::Value root;
+    if (!sv::Config::load_from_file(path, root)) {
+        return false;
+    }
+    if (!root.isObject()) {
+        std::cerr << "Configuration error: touchscreen config root must be a JSON object."
+                  << std::endl;
+        return false;
+    }
+
+    if (root.isMember("name")) {
+        if (!root["name"].isString()) {
+            std::cerr << "Configuration error: 'name' must be a string."
+                      << std::endl;
+            return false;
+        }
+        if (!root["name"].asString().empty()) {
+            config.name = root["name"].asString();
+        }
+    }
+
+    if (root.isMember("console")) {
+        if (!root["console"].isString()) {
+            std::cerr << "Configuration error: 'console' must be a string."
+                      << std::endl;
+            return false;
+        }
+        if (!root["console"].asString().empty()) {
+            config.console = root["console"].asString();
+        }
+    }
+
+    if (!root.isMember("video_source") || !root["video_source"].isArray()) {
+        std::cerr << "Configuration error: 'video_source' must be an array of strings."
+                  << std::endl;
+        return false;
+    }
+
+    config.video_sources.clear();
+    for (const auto& item : root["video_source"]) {
+        if (!item.isString()) {
+            std::cerr << "Configuration error: all 'video_source' entries must be strings."
+                      << std::endl;
+            return false;
+        }
+        const std::string source = item.asString();
+        if (!source.empty()) {
+            config.video_sources.push_back(source);
+        }
+    }
+
+    return true;
+}
+
 // UI and ROS2 Main Window
 class TouchscreenWindow : public Gtk::Window {
 public:
     TouchscreenWindow(std::shared_ptr<rclcpp::Node> node, 
-                      const std::string& console_name, 
-                      const std::vector<std::string>& socket_paths)
-        : m_node(node), m_console_name(console_name), m_socket_paths(socket_paths),
+                      const std::string& settings_name,
+                      const std::string& console_name,
+                      const std::vector<VideoSource>& video_sources)
+        : m_node(node), m_settings_name(settings_name), m_console_name(console_name),
+          m_video_sources(video_sources),
           m_main_paned(Gtk::ORIENTATION_HORIZONTAL),
           m_left_pane(Gtk::ORIENTATION_VERTICAL, 10),
           m_right_pane(Gtk::ORIENTATION_VERTICAL, 5),
@@ -64,7 +245,7 @@ public:
         setup_left_pane();
 
         // Setup Main Resizable Layout
-        if (!m_socket_paths.empty()) {
+        if (!m_video_sources.empty()) {
             m_right_pane.set_hexpand(true);
             m_right_pane.set_vexpand(true);
             m_main_paned.pack1(m_left_pane, false, false); // Keep left controls fixed size on window resize
@@ -86,11 +267,23 @@ public:
 
         // Build right video panel structure and start pipelines AFTER the layout is attached and shown
         setup_right_pane();
+
+        load_persisted_display_settings();
+        if (m_have_persisted_display_settings) {
+            Glib::signal_idle().connect_once([this]() {
+                apply_window_display_settings();
+            });
+        }
+        m_monitor_poll_connection = Glib::signal_timeout().connect(
+            sigc::mem_fun(*this, &TouchscreenWindow::poll_window_monitor), 1000);
     }
 
     virtual ~TouchscreenWindow() {
         if (m_ui_tick_connection.connected()) {
             m_ui_tick_connection.disconnect();
+        }
+        if (m_monitor_poll_connection.connected()) {
+            m_monitor_poll_connection.disconnect();
         }
 
         close_video_source();
@@ -104,8 +297,19 @@ protected:
     }
 
     bool on_delete_event(GdkEventAny* /* any_event */) override {
+        save_persisted_display_settings();
         hide();
         return true;
+    }
+
+    bool on_window_state_event(GdkEventWindowState* event) override {
+        const bool handled = Gtk::Window::on_window_state_event(event);
+        if ((event->changed_mask & GDK_WINDOW_STATE_FULLSCREEN) != 0) {
+            m_window_fullscreen =
+                (event->new_window_state & GDK_WINDOW_STATE_FULLSCREEN) != 0;
+            save_persisted_display_settings();
+        }
+        return handled;
     }
 
 private:
@@ -419,14 +623,14 @@ private:
     }
 
     void setup_right_pane() {
-        if (m_socket_paths.empty()) {
+        if (m_video_sources.empty()) {
             return;
         }
 
         m_video_area.set_hexpand(true);
         m_video_area.set_vexpand(true);
         m_right_pane.pack_start(m_video_area, Gtk::PACK_EXPAND_WIDGET, 0);
-        open_video_source(m_socket_paths[0]);
+        open_video_source(m_video_sources[0].socket_path);
         m_right_pane.show_all();
     }
 
@@ -927,16 +1131,11 @@ private:
         return item;
     }
 
-    std::string video_source_label(const std::string& path) const {
-        size_t last_slash = path.find_last_of('/');
-        return (last_slash == std::string::npos) ? path : path.substr(last_slash + 1);
-    }
-
     void append_video_source_items(Gtk::Menu& menu) {
-        for (const auto& path : m_socket_paths) {
-            auto* item = create_menu_item(video_source_label(path));
-            item->signal_activate().connect([this, path]() {
-                open_video_source(path);
+        for (const auto& source : m_video_sources) {
+            auto* item = create_menu_item(source.label);
+            item->signal_activate().connect([this, source]() {
+                open_video_source(source.socket_path);
             });
             menu.append(*item);
         }
@@ -950,7 +1149,7 @@ private:
         }
 
         // 1. Add "Use video" submenu
-        if (m_socket_paths.size() > 1) {
+        if (m_video_sources.size() > 1) {
             auto* use_video_item = create_menu_item("Use video");
             auto* video_sources_menu = Gtk::manage(new Gtk::Menu());
             append_video_source_items(*video_sources_menu);
@@ -966,29 +1165,29 @@ private:
         apply_menu_item_text_color(*send_to_item);
 
         auto display = Gdk::Display::get_default();
-        int n_monitors = display->get_n_monitors();
-        for (int i = 0; i < n_monitors; ++i) {
-            auto monitor = display->get_monitor(i);
-            std::string model = monitor->get_model();
-            std::string label = model.empty() ? "Monitor " + std::to_string(i + 1) : model;
-            
-            auto* monitor_item = create_menu_item(label);
-            monitor_item->signal_activate().connect([this, i]() {
-                send_to_monitor(i);
-            });
-            monitors_menu->append(*monitor_item);
+        if (display) {
+            int n_monitors = display->get_n_monitors();
+            for (int i = 0; i < n_monitors; ++i) {
+                auto monitor = display->get_monitor(i);
+                std::string model = monitor->get_model();
+                std::string label = model.empty() ? "Monitor " + std::to_string(i + 1) : model;
+                
+                auto* monitor_item = create_menu_item(label);
+                monitor_item->signal_activate().connect([this, i]() {
+                    send_to_monitor(i);
+                });
+                monitors_menu->append(*monitor_item);
+            }
         }
         m_wrench_menu.append(*send_to_item);
 
         // 3. Add "Fullscreen" toggle item
-        bool is_fullscreen = (get_window()->get_state() & Gdk::WINDOW_STATE_FULLSCREEN) != 0;
+        bool is_fullscreen = is_window_fullscreen();
         auto* fullscreen_item = create_menu_item(is_fullscreen ? "Exit Fullscreen" : "Fullscreen");
         fullscreen_item->signal_activate().connect([this, is_fullscreen]() {
-            if (is_fullscreen) {
-                unfullscreen();
-            } else {
-                fullscreen();
-            }
+            m_window_fullscreen = !is_fullscreen;
+            apply_window_display_settings();
+            save_persisted_display_settings();
         });
         m_wrench_menu.append(*fullscreen_item);
 
@@ -1010,13 +1209,142 @@ private:
 
     void send_to_monitor(int monitor_idx) {
         auto display = Gdk::Display::get_default();
-        if (monitor_idx >= 0 && monitor_idx < display->get_n_monitors()) {
-            auto monitor = display->get_monitor(monitor_idx);
-            Gdk::Rectangle rect;
-            monitor->get_geometry(rect);
-            unmaximize();
-            move(rect.get_x(), rect.get_y());
+        if (display && monitor_idx >= 0 && monitor_idx < display->get_n_monitors()) {
+            m_window_monitor_index = monitor_idx;
+            apply_window_display_settings();
+            save_persisted_display_settings();
         }
+    }
+
+    bool is_window_fullscreen() const {
+        auto gdk_window = get_window();
+        return gdk_window &&
+               ((gdk_window->get_state() & Gdk::WINDOW_STATE_FULLSCREEN) != 0);
+    }
+
+    std::string settings_file_path() const {
+        std::string safe_name = m_settings_name.empty() ? "dvrk_display" : m_settings_name;
+        for (char& ch : safe_name) {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (!std::isalnum(uch) && ch != '-' && ch != '_') {
+                ch = '_';
+            }
+        }
+
+        return Glib::build_filename(
+            Glib::build_filename(Glib::get_user_config_dir(), "dvrk_display"),
+            safe_name + "_touchscreen_gui.ini");
+    }
+
+    void load_persisted_display_settings() {
+        m_have_persisted_display_settings = false;
+        const std::string path = settings_file_path();
+        if (!std::filesystem::exists(path)) {
+            return;
+        }
+
+        try {
+            Glib::KeyFile key_file;
+            key_file.load_from_file(path);
+            m_window_monitor_index = key_file.get_integer("window", "monitor");
+            m_window_fullscreen = key_file.get_boolean("window", "fullscreen");
+            m_have_persisted_display_settings = true;
+        } catch (const Glib::Error& error) {
+            std::cerr << "Warning: unable to load display settings from '" << path
+                      << "': " << error.what() << std::endl;
+        }
+    }
+
+    void save_persisted_display_settings() {
+        try {
+            const std::string path = settings_file_path();
+            std::filesystem::create_directories(
+                std::filesystem::path(path).parent_path());
+
+            Glib::KeyFile key_file;
+            key_file.set_string("viewer", "name", m_settings_name);
+            key_file.set_integer("window", "monitor", m_window_monitor_index);
+            key_file.set_boolean("window", "fullscreen", m_window_fullscreen);
+            Glib::file_set_contents(path, key_file.to_data());
+        } catch (const Glib::Error& error) {
+            std::cerr << "Warning: unable to save display settings: "
+                      << error.what() << std::endl;
+        } catch (const std::exception& error) {
+            std::cerr << "Warning: unable to save display settings: "
+                      << error.what() << std::endl;
+        }
+    }
+
+    void apply_window_display_settings() {
+        auto display = Gdk::Display::get_default();
+        if (!display || display->get_n_monitors() <= 0) {
+            return;
+        }
+
+        const int target_monitor = std::max(
+            0, std::min(m_window_monitor_index, display->get_n_monitors() - 1));
+        m_window_monitor_index = target_monitor;
+
+        auto monitor = display->get_monitor(target_monitor);
+        if (!monitor) {
+            return;
+        }
+
+        Gdk::Rectangle rect;
+        monitor->get_geometry(rect);
+        const int monitor_x = rect.get_x();
+        const int monitor_y = rect.get_y();
+        const int monitor_width = rect.get_width();
+        const int monitor_height = rect.get_height();
+
+        unmaximize();
+        unfullscreen();
+        move(monitor_x, monitor_y);
+        present();
+
+        if (m_window_fullscreen) {
+            Gtk::Window* window = this;
+            Glib::signal_idle().connect_once([window, monitor_x, monitor_y,
+                                               monitor_width, monitor_height]() {
+                if (window) {
+                    window->move(monitor_x, monitor_y);
+                    window->resize(monitor_width, monitor_height);
+                    window->fullscreen();
+                    window->present();
+                }
+            });
+        }
+    }
+
+    bool poll_window_monitor() {
+        const int monitor_idx = monitor_index_for_window();
+        if (monitor_idx >= 0 && monitor_idx != m_window_monitor_index) {
+            m_window_monitor_index = monitor_idx;
+            save_persisted_display_settings();
+        }
+        return true;
+    }
+
+    int monitor_index_for_window() {
+        auto display = Gdk::Display::get_default();
+        if (!display) {
+            return -1;
+        }
+        auto gdk_window = get_window();
+        if (!gdk_window) {
+            return -1;
+        }
+        auto monitor = display->get_monitor_at_window(gdk_window);
+        if (!monitor) {
+            return -1;
+        }
+        const int n = display->get_n_monitors();
+        for (int i = 0; i < n; ++i) {
+            if (display->get_monitor(i) == monitor) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     void toggle_dark_mode() {
@@ -1174,8 +1502,9 @@ private:
 
     // ROS2 structures
     std::shared_ptr<rclcpp::Node> m_node;
+    std::string m_settings_name;
     std::string m_console_name;
-    std::vector<std::string> m_socket_paths;
+    std::vector<VideoSource> m_video_sources;
 
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr m_teleop_selected_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr m_teleop_unselected_sub;
@@ -1254,6 +1583,7 @@ private:
 
     // Slider signal connections for loopback control
     sigc::connection m_ui_tick_connection;
+    sigc::connection m_monitor_poll_connection;
     sigc::connection m_scale_connection;
     sigc::connection m_volume_connection;
     std::chrono::steady_clock::time_point m_scale_last_change_time;
@@ -1272,6 +1602,9 @@ private:
 
     // Theme options
     bool m_dark_mode;
+    int m_window_monitor_index = 0;
+    bool m_window_fullscreen = false;
+    bool m_have_persisted_display_settings = false;
 
     // Colors
     Gdk::RGBA m_color_green;
@@ -1281,17 +1614,36 @@ private:
 
 // Main Entry Point
 int main(int argc, char* argv[]) {
-    // Parse arguments manually to extract console name and unixfd socket paths
-    std::string console_name = "console";
-    std::vector<std::string> socket_paths;
-    
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-c" && i + 1 < argc) {
-            console_name = argv[++i];
-        } else if (arg == "-s" && i + 1 < argc) {
-            socket_paths.push_back(argv[++i]);
+    // The touchscreen panel has no text-entry widgets.  Avoid routing GTK
+    // input through IBus, which can still trigger GNOME's on-screen keyboard
+    // even when the accessibility screen-keyboard setting is disabled.
+    setenv("GTK_IM_MODULE", "gtk-im-context-simple", 1);
+
+    CommandLineOptions options;
+    if (!parse_arguments(argc, argv, options)) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    TouchscreenConfig config;
+    if (!options.config_file.empty() &&
+        !load_touchscreen_config(options.config_file, config)) {
+        return 1;
+    }
+
+    if (options.console_override) {
+        config.console = options.console_name;
+    }
+    for (const auto& source : options.video_sources) {
+        if (!source.empty()) {
+            config.video_sources.push_back(source);
         }
+    }
+
+    std::vector<VideoSource> video_sources;
+    video_sources.reserve(config.video_sources.size());
+    for (const auto& source : config.video_sources) {
+        video_sources.push_back(make_video_source(config.name, source));
     }
 
     // Initialize GStreamer
@@ -1305,7 +1657,7 @@ int main(int argc, char* argv[]) {
     auto app = Gtk::Application::create("org.dvrk.display.touchscreen", Gio::APPLICATION_NON_UNIQUE);
 
     // Create the Window
-    TouchscreenWindow window(node, console_name, socket_paths);
+    TouchscreenWindow window(node, config.name, config.console, video_sources);
 
     // Wire up ROS2 spin with GLib main loop (every 20ms)
     guint ros_spin_source = g_timeout_add(20, [](gpointer data) -> gboolean {

@@ -4,10 +4,6 @@ This package uses a regular GTK application for the touchscreen panel.  Touch
 input is handled by the Linux desktop input stack, not by `dvrk_display`
 directly.
 
-If the application starts but touches do not work, first check the physical
-connections: DisplayPort/HDMI carries video, while most touchscreen monitors
-send touch events over a separate USB cable.
-
 ## 1. Confirm the Session Type
 
 These instructions use `xinput` and `xrandr`, so they apply to an X11 session.
@@ -99,17 +95,61 @@ Use XRandR output names, such as `DP-2`, with `xinput map-to-output`.
 
 ## 5. Make a Fixed-Port Setup Persistent
 
-If the monitor will always be connected to the same output, create an X11
-session snippet for all users:
+If the monitor will always be connected to the same output, create a small
+helper script and let the desktop start it on login.  The helper logs every run
+so it is easy to tell whether the desktop actually launched it:
+
+```sh
+sudo tee /usr/local/bin/dvrk-map-touchscreen >/dev/null <<'EOF'
+#!/bin/sh
+
+LOG_FILE="/tmp/dvrk-touchscreen-map-${USER:-unknown}.log"
+exec >>"$LOG_FILE" 2>&1
+
+echo "==== $(date) ===="
+echo "DISPLAY=${DISPLAY:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-}"
+
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if xinput list "pointer:TSTP MTouch" >/dev/null 2>&1 \
+       && xrandr --query | grep -q "^DP-2 connected"; then
+        echo "Mapping pointer:TSTP MTouch to DP-2"
+        xinput map-to-output "pointer:TSTP MTouch" DP-2
+        exit $?
+    fi
+    echo "Attempt $attempt: touch device or DP-2 not ready"
+    sleep 1
+done
+
+echo "Unable to map touchscreen"
+exit 1
+EOF
+
+sudo chmod 755 /usr/local/bin/dvrk-map-touchscreen
+```
+
+For GNOME, use XDG autostart:
+
+```sh
+sudo tee /etc/xdg/autostart/dvrk-touchscreen.desktop >/dev/null <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=dVRK Touchscreen Mapping
+Exec=/usr/local/bin/dvrk-map-touchscreen
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+```
+
+If XDG autostart does not run on your system, use this `/etc/X11/Xsession.d`
+fallback instead.  These files are sourced by the session and normally use mode
+`644`; they do not need executable permissions:
 
 ```sh
 sudo tee /etc/X11/Xsession.d/90-dvrk-touchscreen >/dev/null <<'EOF'
-#!/bin/sh
-
-xinput map-to-output "pointer:TSTP MTouch" DP-2 2>/dev/null || true
+/usr/local/bin/dvrk-map-touchscreen &
 EOF
 
-sudo chmod 755 /etc/X11/Xsession.d/90-dvrk-touchscreen
+sudo chmod 644 /etc/X11/Xsession.d/90-dvrk-touchscreen
 ```
 
 Log out and back in, then test the touchscreen again.
@@ -134,6 +174,14 @@ sudo tee /usr/local/bin/dvrk-map-touchscreen >/dev/null <<'EOF'
 
 TOUCH_DEVICE_MATCH="TSTP MTouch"
 MONITOR_PRODUCT="CX156"
+LOG_FILE="/tmp/dvrk-touchscreen-map-${USER:-unknown}.log"
+
+exec >>"$LOG_FILE" 2>&1
+
+echo "==== $(date) ===="
+echo "DISPLAY=${DISPLAY:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-}"
+echo "Looking for touch device matching '$TOUCH_DEVICE_MATCH'"
+echo "Looking for monitor product '$MONITOR_PRODUCT'"
 
 find_touch_device() {
     xinput list --name-only | grep -F "$TOUCH_DEVICE_MATCH" | head -n 1
@@ -185,19 +233,22 @@ find_monitor_output() {
     return 1
 }
 
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
     touch_device=$(find_touch_device)
     monitor_output=$(find_monitor_output)
+    echo "Attempt $attempt: touch_device='$touch_device' monitor_output='$monitor_output'"
 
     if [ -n "$touch_device" ] && [ -n "$monitor_output" ]; then
+        echo "Mapping '$touch_device' to '$monitor_output'"
         xinput map-to-output "$touch_device" "$monitor_output"
-        exit 0
+        exit $?
     fi
 
     sleep 1
 done
 
-exit 0
+echo "Unable to map touchscreen"
+exit 1
 EOF
 
 sudo chmod 755 /usr/local/bin/dvrk-map-touchscreen
@@ -206,18 +257,96 @@ sudo chmod 755 /usr/local/bin/dvrk-map-touchscreen
 Call it for every X11 login:
 
 ```sh
-sudo tee /etc/X11/Xsession.d/90-dvrk-touchscreen >/dev/null <<'EOF'
-#!/bin/sh
+sudo tee /etc/xdg/autostart/dvrk-touchscreen.desktop >/dev/null <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=dVRK Touchscreen Mapping
+Exec=/usr/local/bin/dvrk-map-touchscreen
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+```
 
-/usr/local/bin/dvrk-map-touchscreen >/dev/null 2>&1 &
+For systems that do not use XDG autostart, call the helper from `Xsession.d`
+as a fallback.  These files are sourced by the session and normally use mode
+`644`; they do not need executable permissions:
+
+```sh
+sudo tee /etc/X11/Xsession.d/90-dvrk-touchscreen >/dev/null <<'EOF'
+/usr/local/bin/dvrk-map-touchscreen &
 EOF
 
-sudo chmod 755 /etc/X11/Xsession.d/90-dvrk-touchscreen
+sudo chmod 644 /etc/X11/Xsession.d/90-dvrk-touchscreen
 ```
 
 Log out and back in, then test the touchscreen again.
 
-## 7. Troubleshooting
+## 7. Disable the GNOME Virtual Keyboard
+
+GNOME can show its on-screen keyboard when a touchscreen is present and a text
+field gets focus.  For the dVRK touchscreen panel this is usually distracting.
+
+For the current user, disable it in the desktop UI:
+
+```text
+Settings -> Accessibility -> Typing -> Screen Keyboard: Off
+```
+
+Or run:
+
+```sh
+gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled false
+```
+
+For all users, set a dconf default:
+
+```sh
+sudo mkdir -p /etc/dconf/profile
+
+if [ ! -f /etc/dconf/profile/user ]; then
+    sudo tee /etc/dconf/profile/user >/dev/null <<'EOF'
+user-db:user
+system-db:local
+EOF
+elif ! grep -q '^system-db:local$' /etc/dconf/profile/user; then
+    echo 'system-db:local' | sudo tee -a /etc/dconf/profile/user >/dev/null
+fi
+
+sudo mkdir -p /etc/dconf/db/local.d
+
+sudo tee /etc/dconf/db/local.d/00-dvrk-disable-screen-keyboard >/dev/null <<'EOF'
+[org/gnome/desktop/a11y/applications]
+screen-keyboard-enabled=false
+EOF
+
+sudo dconf update
+```
+
+To prevent users from turning it back on accidentally, also add a dconf lock:
+
+```sh
+sudo mkdir -p /etc/dconf/db/local.d/locks
+
+sudo tee /etc/dconf/db/local.d/locks/00-dvrk-disable-screen-keyboard >/dev/null <<'EOF'
+/org/gnome/desktop/a11y/applications/screen-keyboard-enabled
+EOF
+
+sudo dconf update
+```
+
+Log out and back in after changing dconf settings.
+
+If the keyboard still appears for this application, bypass IBus for the
+touchscreen process:
+
+```sh
+GTK_IM_MODULE=gtk-im-context-simple ros2 run dvrk_display touchscreen -c /path/to/touchscreen.json
+```
+
+Current versions of the touchscreen executable set this variable internally
+because the app has no text-entry widgets.
+
+## 8. Troubleshooting
 
 Show input devices:
 
@@ -237,6 +366,12 @@ Show detailed display properties and EDID blocks:
 xrandr --verbose
 ```
 
+Show the persistent mapper log:
+
+```sh
+cat "/tmp/dvrk-touchscreen-map-${USER}.log"
+```
+
 Check what the helper script detects:
 
 ```sh
@@ -245,12 +380,20 @@ echo $?
 ```
 
 If the touch device is visible but touches are offset or land on the wrong
-screen, rerun:
+screen, rerun the mapping after the desktop has loaded:
 
 ```sh
 xinput map-to-output "pointer:TSTP MTouch" DP-2
 ```
 
 If that fixes the problem, update the persistent script's monitor product or
-fixed output name.
+fixed output name.  Also make sure the persistent script runs after GNOME
+applies the monitor layout.  A symptom of an early mapping is that touching the
+screen moves or hides the mouse pointer, but taps do not land on the expected
+application buttons.
 
+Check whether GNOME's virtual keyboard is enabled:
+
+```sh
+gsettings get org.gnome.desktop.a11y.applications screen-keyboard-enabled
+```
