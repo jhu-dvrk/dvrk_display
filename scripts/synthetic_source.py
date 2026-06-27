@@ -28,14 +28,25 @@ class SyntheticSource(Node):
         
         Gst.init(None)
         
-        # Pipeline: videotestsrc -> cairooverlay -> shmsink
-        # We use a reasonably large shm-size to avoid drops.
-        # Format I420 640x480 is ~460KB per frame.
+        # Remove existing socket files to avoid bind errors
+        for socket_path in ["/tmp/dvrk_test_l", "/tmp/dvrk_test_r"]:
+            if os.path.exists(socket_path):
+                try:
+                    os.unlink(socket_path)
+                except OSError:
+                    pass
+
+        # Pipeline: videotestsrc -> cairooverlay -> unixfdsink
         pipeline_str = (
             "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGRA ! "
-            "cairooverlay name=overlay_l ! videoconvert ! video/x-raw,format=I420 ! shmsink socket-path=/tmp/dvrk_test_l shm-size=10000000 wait-for-connection=false sync=true "
+            "cairooverlay name=overlay_l ! videoconvert ! video/x-raw,format=I420 ! "
+            "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
+            "unixfdsink socket-path=/tmp/dvrk_test_l sync=true async=false "
+            
             "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGRA ! "
-            "cairooverlay name=overlay_r ! videoconvert ! video/x-raw,format=I420 ! shmsink socket-path=/tmp/dvrk_test_r shm-size=10000000 wait-for-connection=false sync=true"
+            "cairooverlay name=overlay_r ! videoconvert ! video/x-raw,format=I420 ! "
+            "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
+            "unixfdsink socket-path=/tmp/dvrk_test_r sync=true async=false"
         )
 
         
@@ -54,6 +65,16 @@ class SyntheticSource(Node):
         self.bus = self.pipeline.get_bus()
         self.bus.add_signal_watch()
         self.bus.connect("message", self.on_message)
+
+        # Register Unix signal handler for SIGINT and SIGTERM to stop cleanly
+        import signal
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, self.sigint_handler)
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, self.sigint_handler)
+
+    def sigint_handler(self):
+        self.get_logger().info("Interrupted by user (SIGINT/SIGTERM)")
+        self.stop()
+        return GLib.SOURCE_REMOVE
 
     def on_draw(self, overlay, context, timestamp, duration, eye):
         with self.counter_lock:
@@ -91,11 +112,14 @@ class SyntheticSource(Node):
 
         # Publish ROS message 
         # We publish the correlation data to ROS so 'record' can capture it.
-        if eye == "LEFT":
+        if rclpy.ok() and eye == "LEFT":
             header = Header()
             header.stamp = curr_time.to_msg()
             header.frame_id = f"test_source:{local_counter}"
-            self.pub.publish(header)
+            try:
+                self.pub.publish(header)
+            except Exception:
+                pass
 
     def on_message(self, bus, message):
         t = message.type
@@ -111,26 +135,37 @@ class SyntheticSource(Node):
 
     def stop(self):
         self.pipeline.set_state(Gst.State.NULL)
-        rclpy.shutdown()
-        sys.exit(0)
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+        os._exit(0)
 
     def run(self):
         self.get_logger().info("Starting pipeline. Streams will be available at /tmp/dvrk_test_l and /tmp/dvrk_test_r")
         self.pipeline.set_state(Gst.State.PLAYING)
         
         # Use a separate thread for rclpy.spin to allow GStreamer to run its own loop
-        spin_thread = threading.Thread(target=rclpy.spin, args=(self,), daemon=True)
+        def safe_spin():
+            try:
+                rclpy.spin(self)
+            except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+                pass
+            except Exception:
+                pass
+
+        spin_thread = threading.Thread(target=safe_spin, daemon=True)
         spin_thread.start()
         
-        try:
-            loop = GLib.MainLoop()
-            loop.run()
-        except KeyboardInterrupt:
-            self.get_logger().info("Interrupted by user")
-        finally:
-            self.pipeline.set_state(Gst.State.NULL)
+        loop = GLib.MainLoop()
+        loop.run()
 
 def main():
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    
     rclpy.init()
     node = SyntheticSource()
     node.run()

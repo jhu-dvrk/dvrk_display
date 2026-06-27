@@ -8,6 +8,7 @@
   <license>MIT</license>
 
   <depend>rclcpp</depend>
+  <depend>crtk_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>data_collection</depend>
   <depend>ament_index_cpp</depend>

@@ -11,6 +11,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(crtk_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(data_collection REQUIRED)
@@ -73,7 +74,7 @@ target_link_libraries(dvrk_display_overlay
   ${GTKMM_LIBRARIES}
 )
 
-set(EXECUTABLES stereo)
+set(EXECUTABLES stereo touchscreen)
 
 foreach(exe IN LISTS EXECUTABLES)
   add_executable(${exe}
@@ -84,11 +85,13 @@ foreach(exe IN LISTS EXECUTABLES)
     sensor_msgs
     std_msgs
     data_collection
+    crtk_msgs
   )
   target_include_directories(${exe} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/common
     ${GST_INCLUDE_DIRS}
     ${JSONCPP_INCLUDE_DIRS}
+    ${CAIRO_DIR}
     ${CAIRO_INCLUDE_DIRS}
     ${GTKMM_INCLUDE_DIRS}
   )
@@ -110,6 +113,7 @@ endforeach()
 
 install(TARGETS
   stereo
+  touchscreen
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
