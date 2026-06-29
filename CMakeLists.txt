@@ -74,7 +74,7 @@ target_link_libraries(dvrk_display_overlay
   ${GTKMM_LIBRARIES}
 )
 
-set(EXECUTABLES stereo touchscreen)
+set(EXECUTABLES stereo control_panel)
 
 foreach(exe IN LISTS EXECUTABLES)
   add_executable(${exe}
@@ -113,7 +113,7 @@ endforeach()
 
 install(TARGETS
   stereo
-  touchscreen
+  control_panel
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

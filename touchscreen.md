@@ -337,13 +337,13 @@ sudo dconf update
 Log out and back in after changing dconf settings.
 
 If the keyboard still appears for this application, bypass IBus for the
-touchscreen process:
+control panel process:
 
 ```sh
-GTK_IM_MODULE=gtk-im-context-simple ros2 run dvrk_display touchscreen -c /path/to/touchscreen.json
+GTK_IM_MODULE=gtk-im-context-simple ros2 run dvrk_display control_panel -c /path/to/touchscreen.json
 ```
 
-Current versions of the touchscreen executable set this variable internally
+Current versions of the control panel executable set this variable internally
 because the app has no text-entry widgets.
 
 ## 8. Troubleshooting

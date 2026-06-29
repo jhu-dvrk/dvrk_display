@@ -53,7 +53,7 @@ struct VideoSource {
     std::string socket_path;
 };
 
-struct TouchscreenConfig {
+struct ControlPanelConfig {
     std::string name = "dvrk_display";
     std::string console = "console";
     std::vector<std::string> video_sources;
@@ -109,7 +109,7 @@ void print_usage(const char *executable) {
     std::cerr << "Usage: " << executable
               << " [-c <config.json>] [-C <console>] [-s <video-source>]..."
               << std::endl;
-    std::cerr << "  -c, --config   Touchscreen JSON config file" << std::endl;
+    std::cerr << "  -c, --config   Control panel JSON config file" << std::endl;
     std::cerr << "  -C, --console  dVRK console namespace override" << std::endl;
     std::cerr << "  -s, --source   Video source socket path or stream name" << std::endl;
 }
@@ -123,7 +123,7 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
 
         if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
             if (!options.config_file.empty()) {
-                std::cerr << "Error: multiple touchscreen config files are not supported."
+                std::cerr << "Error: multiple control panel config files are not supported."
                           << std::endl;
                 return false;
             }
@@ -156,7 +156,7 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
     return true;
 }
 
-bool load_touchscreen_config(const std::string& path, TouchscreenConfig& config) {
+bool load_control_panel_config(const std::string& path, ControlPanelConfig& config) {
     if (!std::filesystem::exists(path)) {
         std::cerr << "Config file does not exist: " << path << std::endl;
         return false;
@@ -167,7 +167,7 @@ bool load_touchscreen_config(const std::string& path, TouchscreenConfig& config)
         return false;
     }
     if (!root.isObject()) {
-        std::cerr << "Configuration error: touchscreen config root must be a JSON object."
+        std::cerr << "Configuration error: control panel config root must be a JSON object."
                   << std::endl;
         return false;
     }
@@ -217,9 +217,9 @@ bool load_touchscreen_config(const std::string& path, TouchscreenConfig& config)
 }
 
 // UI and ROS2 Main Window
-class TouchscreenWindow : public Gtk::Window {
+class ControlPanelWindow : public Gtk::Window {
 public:
-    TouchscreenWindow(std::shared_ptr<rclcpp::Node> node, 
+    ControlPanelWindow(std::shared_ptr<rclcpp::Node> node, 
                       const std::string& settings_name,
                       const std::string& console_name,
                       const std::vector<VideoSource>& video_sources)
@@ -235,7 +235,7 @@ public:
           m_dvrk_powered_on(false),
           m_dark_mode(false)
     {
-        set_title("dVRK Touchscreen Control Panel");
+        set_title("dVRK Control Panel");
         set_default_size(1024, 600);
 
         // Apply sleek styling and dynamic CSS provider
@@ -260,7 +260,7 @@ public:
         setup_ros();
 
         // Periodically tick UI elements (e.g. reset state machines, ROS updates)
-        m_ui_tick_connection = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TouchscreenWindow::on_ui_tick), 100);
+        m_ui_tick_connection = Glib::signal_timeout().connect(sigc::mem_fun(*this, &ControlPanelWindow::on_ui_tick), 100);
 
         // Show window children first to realize widgets
         show_all_children();
@@ -275,10 +275,10 @@ public:
             });
         }
         m_monitor_poll_connection = Glib::signal_timeout().connect(
-            sigc::mem_fun(*this, &TouchscreenWindow::poll_window_monitor), 1000);
+            sigc::mem_fun(*this, &ControlPanelWindow::poll_window_monitor), 1000);
     }
 
-    virtual ~TouchscreenWindow() {
+    virtual ~ControlPanelWindow() {
         if (m_ui_tick_connection.connected()) {
             m_ui_tick_connection.disconnect();
         }
@@ -442,7 +442,7 @@ private:
 
         m_arms_box.pack_start(*dvrk_master_layout, Gtk::PACK_SHRINK, 0);
 
-        m_dvrk_power_btn->signal_clicked().connect(sigc::mem_fun(*this, &TouchscreenWindow::on_dvrk_power_clicked));
+        m_dvrk_power_btn->signal_clicked().connect(sigc::mem_fun(*this, &ControlPanelWindow::on_dvrk_power_clicked));
 
         // Instantiate rows for standard dVRK arms (PSM1-3, ECM, MTML-R)
         std::vector<std::string> arm_names = {"PSM1", "PSM2", "PSM3", "ECM", "MTML", "MTMR"};
@@ -487,7 +487,7 @@ private:
 
         m_teleops_box.pack_start(*master_layout, Gtk::PACK_SHRINK, 0);
 
-        m_teleop_enable_btn->signal_clicked().connect(sigc::mem_fun(*this, &TouchscreenWindow::on_master_enable_clicked));
+        m_teleop_enable_btn->signal_clicked().connect(sigc::mem_fun(*this, &ControlPanelWindow::on_master_enable_clicked));
 
         // 3. System Frame (Scale & Volume) (No label name)
         Gtk::Grid* system_grid = Gtk::manage(new Gtk::Grid());
@@ -546,7 +546,7 @@ private:
         m_wrench_btn->set_valign(Gtk::ALIGN_CENTER);
         m_wrench_btn->set_halign(Gtk::ALIGN_CENTER);
         m_wrench_btn->set_margin_left(16);
-        m_wrench_btn->signal_clicked().connect(sigc::mem_fun(*this, &TouchscreenWindow::on_wrench_clicked));
+        m_wrench_btn->signal_clicked().connect(sigc::mem_fun(*this, &ControlPanelWindow::on_wrench_clicked));
 
         system_grid->attach(*m_wrench_btn, 3, 0, 1, 2);
 
@@ -555,9 +555,9 @@ private:
 
         // Connect slider signals
         m_scale_connection = m_scale_slider->signal_value_changed().connect(
-            sigc::mem_fun(*this, &TouchscreenWindow::on_scale_slider_changed));
+            sigc::mem_fun(*this, &ControlPanelWindow::on_scale_slider_changed));
         m_volume_connection = m_volume_slider->signal_value_changed().connect(
-            sigc::mem_fun(*this, &TouchscreenWindow::on_volume_slider_changed));
+            sigc::mem_fun(*this, &ControlPanelWindow::on_volume_slider_changed));
 
         // Initialize user interaction lock times
         m_scale_last_change_time = std::chrono::steady_clock::now() - std::chrono::seconds(5);
@@ -1193,7 +1193,7 @@ private:
 
         // 4. Add "Dark Mode" toggle item
         auto* dark_mode_item = create_menu_item(m_dark_mode ? "Light Mode" : "Dark Mode");
-        dark_mode_item->signal_activate().connect(sigc::mem_fun(*this, &TouchscreenWindow::toggle_dark_mode));
+        dark_mode_item->signal_activate().connect(sigc::mem_fun(*this, &ControlPanelWindow::toggle_dark_mode));
         m_wrench_menu.append(*dark_mode_item);
 
         // 5. Add "Quit" item
@@ -1233,7 +1233,7 @@ private:
 
         return Glib::build_filename(
             Glib::build_filename(Glib::get_user_config_dir(), "dvrk_display"),
-            safe_name + "_touchscreen_gui.ini");
+            safe_name + "_control_panel_gui.ini");
     }
 
     void load_persisted_display_settings() {
@@ -1614,7 +1614,7 @@ private:
 
 // Main Entry Point
 int main(int argc, char* argv[]) {
-    // The touchscreen panel has no text-entry widgets.  Avoid routing GTK
+    // The control panel has no text-entry widgets.  Avoid routing GTK
     // input through IBus, which can still trigger GNOME's on-screen keyboard
     // even when the accessibility screen-keyboard setting is disabled.
     setenv("GTK_IM_MODULE", "gtk-im-context-simple", 1);
@@ -1625,9 +1625,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    TouchscreenConfig config;
+    ControlPanelConfig config;
     if (!options.config_file.empty() &&
-        !load_touchscreen_config(options.config_file, config)) {
+        !load_control_panel_config(options.config_file, config)) {
         return 1;
     }
 
@@ -1651,13 +1651,13 @@ int main(int argc, char* argv[]) {
 
     // Initialize ROS2
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<rclcpp::Node>("dvrk_touchscreen_node");
+    auto node = std::make_shared<rclcpp::Node>("dvrk_control_panel_node");
 
     // Initialize GTK Application
-    auto app = Gtk::Application::create("org.dvrk.display.touchscreen", Gio::APPLICATION_NON_UNIQUE);
+    auto app = Gtk::Application::create("org.dvrk.display.control_panel", Gio::APPLICATION_NON_UNIQUE);
 
     // Create the Window
-    TouchscreenWindow window(node, config.name, config.console, video_sources);
+    ControlPanelWindow window(node, config.name, config.console, video_sources);
 
     // Wire up ROS2 spin with GLib main loop (every 20ms)
     guint ros_spin_source = g_timeout_add(20, [](gpointer data) -> gboolean {
