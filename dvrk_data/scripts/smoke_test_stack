@@ -22,11 +22,16 @@ def find_sibling_executable(name):
 
 def run_process(label, cmd, log_dir):
     log_path = log_dir / f"{label}.log"
+    ros_log_dir = log_dir / "ros"
+    ros_log_dir.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    env.setdefault("ROS_LOG_DIR", str(ros_log_dir))
     log = log_path.open("w")
     proc = subprocess.Popen(
         cmd,
         stdout=log,
         stderr=subprocess.STDOUT,
+        env=env,
         start_new_session=True,
         text=True,
     )
@@ -62,9 +67,11 @@ def require_alive(entry):
     )
 
 
-def wait_for_path(path, timeout, label):
+def wait_for_path(path, timeout, label, entry=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if entry is not None:
+            require_alive(entry)
         if Path(path).exists():
             return
         time.sleep(0.1)
@@ -84,8 +91,8 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def build_stereo_config(path, sockets, with_display):
-    sinks = ["glimage"] if with_display else []
+def build_stereo_config(path, sockets, display_enabled):
+    sinks = ["glimage"] if display_enabled else []
     write_json(
         path,
         {
@@ -175,7 +182,7 @@ def main():
     parser.add_argument("--startup-timeout", type=float, default=10.0)
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--keep-output", action="store_true")
-    parser.add_argument("--with-display", action="store_true")
+    parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--with-record", action="store_true")
     args = parser.parse_args()
 
@@ -204,7 +211,7 @@ def main():
 
     stereo_config = root / "stereo_display.json"
     record_config = root / "record.json"
-    build_stereo_config(stereo_config, sockets, args.with_display)
+    build_stereo_config(stereo_config, sockets, not args.no_display)
     build_record_config(record_config, record_dir, sockets)
 
     processes = []
@@ -224,12 +231,12 @@ def main():
             "30",
         ]
         processes.append(run_process("synthetic_source", source_cmd, log_dir))
-        wait_for_path(sockets["left"], args.startup_timeout, "left source socket")
-        wait_for_path(sockets["right"], args.startup_timeout, "right source socket")
+        wait_for_path(sockets["left"], args.startup_timeout, "left source socket", processes[-1])
+        wait_for_path(sockets["right"], args.startup_timeout, "right source socket", processes[-1])
 
         stereo_cmd = ["ros2", "run", "dvrk_console", "stereo_display", "-c", str(stereo_config)]
         processes.append(run_process("stereo_display", stereo_cmd, log_dir))
-        wait_for_path(sockets["stereo"], args.startup_timeout, "stereo output socket")
+        wait_for_path(sockets["stereo"], args.startup_timeout, "stereo output socket", processes[-1])
 
         if args.with_record:
             record_cmd = ["ros2", "run", "dvrk_data", "record", "-c", str(record_config)]

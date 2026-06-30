@@ -369,6 +369,84 @@ std::string get_unixfd_upload_chain() {
   return "gldownload ! videoconvert ! video/x-raw,format=I420";
 }
 
+void add_unique_path(std::vector<std::string> &paths, const std::string &path) {
+  if (path.empty()) {
+    return;
+  }
+  if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+    paths.push_back(path);
+  }
+}
+
+void collect_unixfdsrc_socket_paths(const std::string &fragment,
+                                    std::vector<std::string> &paths) {
+  std::size_t cursor = 0;
+  while (cursor < fragment.size()) {
+    const std::size_t src_pos = fragment.find("unixfdsrc", cursor);
+    if (src_pos == std::string::npos) {
+      break;
+    }
+
+    const std::size_t next_src = fragment.find("unixfdsrc", src_pos + 9);
+    const std::size_t search_end =
+        next_src == std::string::npos ? fragment.size() : next_src;
+    const std::size_t prop_pos = fragment.find("socket-path=", src_pos);
+    if (prop_pos != std::string::npos && prop_pos < search_end) {
+      std::size_t value_pos = prop_pos + std::strlen("socket-path=");
+      std::string path;
+      if (value_pos < fragment.size() &&
+          (fragment[value_pos] == '"' || fragment[value_pos] == '\'')) {
+        const char quote = fragment[value_pos++];
+        const std::size_t end_quote = fragment.find(quote, value_pos);
+        if (end_quote != std::string::npos) {
+          path = fragment.substr(value_pos, end_quote - value_pos);
+        }
+      } else {
+        std::size_t value_end = value_pos;
+        while (value_end < fragment.size() &&
+               !std::isspace(
+                   static_cast<unsigned char>(fragment[value_end])) &&
+               fragment[value_end] != '!') {
+          ++value_end;
+        }
+        path = fragment.substr(value_pos, value_end - value_pos);
+      }
+      add_unique_path(paths, path);
+    }
+
+    cursor = src_pos + 9;
+  }
+}
+
+void warn_missing_unixfd_source_sockets(const sv::AppConfig &cfg,
+                                        const rclcpp::Logger &logger) {
+  std::vector<std::string> socket_paths;
+  collect_unixfdsrc_socket_paths(cfg.left.source, socket_paths);
+  collect_unixfdsrc_socket_paths(cfg.right.source, socket_paths);
+  for (const auto &mono : cfg.extra_streams.monos) {
+    collect_unixfdsrc_socket_paths(mono, socket_paths);
+  }
+  for (const auto &stereo : cfg.extra_streams.stereos) {
+    collect_unixfdsrc_socket_paths(stereo.left, socket_paths);
+    collect_unixfdsrc_socket_paths(stereo.right, socket_paths);
+  }
+  if (cfg.ar.enabled) {
+    add_unique_path(socket_paths, cfg.ar.left_socket);
+    add_unique_path(socket_paths, cfg.ar.right_socket);
+  }
+
+  for (const auto &path : socket_paths) {
+    if (!std::filesystem::exists(path)) {
+      RCLCPP_WARN(
+          logger,
+          "unixfd source socket is missing before pipeline start: %s. "
+          "Start the producer for this socket first; otherwise the display "
+          "sinks can remain idle.",
+          path.c_str());
+    }
+  }
+}
+
 GstPadProbeReturn frame_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
                                            gpointer user_data) {
   (void)pad;
@@ -560,6 +638,19 @@ gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
     }
     if (g_app) {
       g_app->quit();
+    }
+  } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_WARNING) {
+    GError *err = nullptr;
+    gchar *dbg = nullptr;
+    gst_message_parse_warning(msg, &err, &dbg);
+    RCLCPP_WARN(node->get_logger(), "GStreamer warning: %s",
+                (err ? err->message : "unknown"));
+    if (dbg != nullptr) {
+      RCLCPP_WARN(node->get_logger(), "Debug details: %s", dbg);
+      g_free(dbg);
+    }
+    if (err != nullptr) {
+      g_error_free(err);
     }
   }
 
@@ -1214,6 +1305,7 @@ public:
 
   void setup_display_windows(GstElement *pipeline) {
     m_pipeline = pipeline;
+    m_has_display_sinks = false;
     
     // Attach pad probes to measure FPS/Hz
     attach_sink_probe(pipeline, "__left_eye_sink__", &m_left_tracker);
@@ -1243,6 +1335,7 @@ public:
       desc.gtk_widget = gtk_widget;
       sinks.push_back(std::move(desc));
     }
+    m_has_display_sinks = !sinks.empty();
     m_display_outputs.rebuild(sinks);
     show_all_children();
   }
@@ -1294,8 +1387,10 @@ protected:
       any = true;
     }
 
-    if (!any) {
+    if (!any && m_has_display_sinks) {
       fps_text += " Waiting for active sinks...";
+    } else if (!any) {
+      fps_text += " No display sinks configured";
     }
     
     m_fps_label.set_markup("<span weight='bold' size='medium'>" + fps_text + "</span>");
@@ -1307,6 +1402,7 @@ protected:
   const sv::AppConfig &m_cfg;
   RebuildCb m_rebuild_cb;
   bool m_scale_visible = false;
+  bool m_has_display_sinks = false;
   Gtk::Box m_vbox;
   Gtk::Box m_extra_box{Gtk::ORIENTATION_HORIZONTAL, 8};
   Gtk::ToggleButton m_btn_overlay;
@@ -1430,6 +1526,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  warn_missing_unixfd_source_sockets(app_cfg, node->get_logger());
   warn_if_interlaced_stream(app_cfg.left.source, node->get_logger(), "left");
   warn_if_interlaced_stream(app_cfg.right.source, node->get_logger(), "right");
 
