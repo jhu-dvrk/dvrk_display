@@ -1,0 +1,41 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/console/camera",
+      "continuous": true
+    },
+    {
+      "name": "/console/camera_quick_tap",
+      "continuous": true
+    },
+    {
+      "name": "/console/clutch",
+      "continuous": true
+    },
+    {
+      "name": "/console/clutch_quick_tap",
+      "continuous": true
+    },
+    {
+      "name": "/console/follow_mode",
+      "continuous": true
+    },
+    {
+      "name": "/console/head_in",
+      "continuous": true
+    },
+    {
+      "name": "/console/head_out",
+      "continuous": true
+    },
+    {
+      "name": "/console/masters_as_mice",
+      "continuous": true
+    },
+    {
+      "name": "/console/operator_present",
+      "continuous": true
+    }
+  ]
+}

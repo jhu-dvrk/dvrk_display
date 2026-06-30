@@ -1,0 +1,9 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "videos": [
+    {
+      "name": "bars",
+      "stream": "videotestsrc"
+    }
+  ]
+}

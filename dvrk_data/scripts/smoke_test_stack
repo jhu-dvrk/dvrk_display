@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def find_sibling_executable(name):
+    here = Path(sys.argv[0]).resolve().parent
+    candidate = here / name
+    if candidate.exists():
+        return [str(candidate)]
+    return ["ros2", "run", "dvrk_data", name]
+
+
+def run_process(label, cmd, log_dir):
+    log_path = log_dir / f"{label}.log"
+    log = log_path.open("w")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    return {"label": label, "cmd": cmd, "log_path": log_path, "log": log, "proc": proc}
+
+
+def stop_process(entry, timeout=5.0):
+    proc = entry["proc"]
+    if proc.poll() is not None:
+        entry["log"].close()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    finally:
+        entry["log"].close()
+
+
+def require_alive(entry):
+    proc = entry["proc"]
+    if proc.poll() is None:
+        return
+    raise RuntimeError(
+        f"{entry['label']} exited early with code {proc.returncode}. "
+        f"See {entry['log_path']}"
+    )
+
+
+def wait_for_path(path, timeout, label):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if Path(path).exists():
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for {label}: {path}")
+
+
+def ros2_topic_pub(topic, msg_type, value):
+    subprocess.run(
+        ["ros2", "topic", "pub", "--once", topic, msg_type, value],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def write_json(path, data):
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def build_stereo_config(path, sockets, with_display):
+    sinks = ["glimage"] if with_display else []
+    write_json(
+        path,
+        {
+            "type": "dvrk_console:stereo_display@1.0.0",
+            "name": "dvrk_smoke",
+            "dvrk_console_namespace": "console",
+            "sinks": sinks,
+            "unixfdsinks": [
+                {
+                    "stream": "stereo",
+                    "name": "smoke_stereo",
+                    "socket_path": sockets["stereo"],
+                }
+            ],
+            "camera": {
+                "size": {"width": 640, "height": 480},
+                "left": {
+                    "stream": (
+                        f"unixfdsrc socket-path={sockets['left']} do-timestamp=true "
+                        "! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream "
+                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+                    )
+                },
+                "right": {
+                    "stream": (
+                        f"unixfdsrc socket-path={sockets['right']} do-timestamp=true "
+                        "! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream "
+                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+                    )
+                },
+                "crop": {"width": 640, "height": 480},
+                "alignment": {"horizontal_shift_px": 0, "vertical_shift_px": 0},
+            },
+        },
+    )
+
+
+def build_record_config(path, output_dir, sockets):
+    write_json(
+        path,
+        {
+            "type": "dvrk_data:record@1.0.0",
+            "data_directory": str(output_dir),
+            "videos": [
+                {
+                    "name": "dvrk_smoke_stereo",
+                    "unixfd_socket_path": sockets["stereo"],
+                    "record": True,
+                    "timestamp_overlay": False,
+                    "side_by_side": "LR",
+                    "encoding": {
+                        "frame_rate": 30,
+                        "bitrate_kbps": 10000,
+                    },
+                }
+            ],
+            "ros_topics": [
+                {"name": "/dvrk_test/correlation", "continuous": False},
+            ],
+        },
+    )
+
+
+def check_recording_output(output_dir):
+    mp4s = list(output_dir.rglob("*.mp4"))
+    sidecars = []
+    for path in output_dir.rglob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("type") == "dvrk_data:sidecar@1.0.0":
+            sidecars.append(path)
+    rosbags = [p for p in output_dir.rglob("*") if p.is_dir() and p.name == "rosbag"]
+    if not mp4s:
+        raise RuntimeError(f"No MP4 recording found under {output_dir}")
+    if not sidecars:
+        raise RuntimeError(f"No sidecar JSON found under {output_dir}")
+    if not rosbags:
+        raise RuntimeError(f"No rosbag directory found under {output_dir}")
+    return mp4s, sidecars, rosbags
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run a unixfd-only dVRK data/console smoke test")
+    parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument("--startup-timeout", type=float, default=10.0)
+    parser.add_argument("--output-dir", default="")
+    parser.add_argument("--keep-output", action="store_true")
+    parser.add_argument("--with-display", action="store_true")
+    parser.add_argument("--with-record", action="store_true")
+    args = parser.parse_args()
+
+    if not os.environ.get("DISPLAY"):
+        raise RuntimeError("smoke_test_stack requires DISPLAY because stereo_display creates a GTK control window")
+    if args.with_record and not os.environ.get("DISPLAY"):
+        raise RuntimeError("--with-record requires DISPLAY because record uses GTK")
+
+    root = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="dvrk_smoke_"))
+    root.mkdir(parents=True, exist_ok=True)
+    log_dir = root / "logs"
+    record_dir = root / "recordings"
+    log_dir.mkdir(exist_ok=True)
+    record_dir.mkdir(exist_ok=True)
+
+    sockets = {
+        "left": str(root / "left.sock"),
+        "right": str(root / "right.sock"),
+        "stereo": str(root / "stereo.sock"),
+    }
+    for socket in sockets.values():
+        try:
+            Path(socket).unlink()
+        except FileNotFoundError:
+            pass
+
+    stereo_config = root / "stereo_display.json"
+    record_config = root / "record.json"
+    build_stereo_config(stereo_config, sockets, args.with_display)
+    build_record_config(record_config, record_dir, sockets)
+
+    processes = []
+    try:
+        source_cmd = find_sibling_executable("synthetic_source.py") + [
+            "--left-socket",
+            sockets["left"],
+            "--right-socket",
+            sockets["right"],
+            "--correlation-topic",
+            "/dvrk_test/correlation",
+            "--width",
+            "640",
+            "--height",
+            "480",
+            "--fps",
+            "30",
+        ]
+        processes.append(run_process("synthetic_source", source_cmd, log_dir))
+        wait_for_path(sockets["left"], args.startup_timeout, "left source socket")
+        wait_for_path(sockets["right"], args.startup_timeout, "right source socket")
+
+        stereo_cmd = ["ros2", "run", "dvrk_console", "stereo_display", "-c", str(stereo_config)]
+        processes.append(run_process("stereo_display", stereo_cmd, log_dir))
+        wait_for_path(sockets["stereo"], args.startup_timeout, "stereo output socket")
+
+        if args.with_record:
+            record_cmd = ["ros2", "run", "dvrk_data", "record", "-c", str(record_config)]
+            processes.append(run_process("record", record_cmd, log_dir))
+            time.sleep(2.0)
+            require_alive(processes[-1])
+            ros2_topic_pub("/record/record", "std_msgs/msg/Bool", "{data: true}")
+
+        deadline = time.monotonic() + args.duration
+        while time.monotonic() < deadline:
+            for entry in processes:
+                require_alive(entry)
+            time.sleep(0.25)
+
+        if args.with_record:
+            ros2_topic_pub("/record/record", "std_msgs/msg/Bool", "{data: false}")
+            time.sleep(1.0)
+
+    finally:
+        for entry in reversed(processes):
+            stop_process(entry)
+
+    if args.with_record:
+        mp4s, sidecars, rosbags = check_recording_output(record_dir)
+        print(f"Recorded MP4 files: {len(mp4s)}")
+        print(f"Sidecar files: {len(sidecars)}")
+        print(f"Rosbag directories: {len(rosbags)}")
+
+    print(f"Smoke test passed. Logs: {log_dir}")
+    if not args.keep_output and not args.output_dir:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

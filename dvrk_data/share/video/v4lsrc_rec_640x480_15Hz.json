@@ -1,0 +1,11 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "videos": [
+    {
+      "name": "v4l_camera",
+      "stream": "v4l2src device=/dev/video4",
+      "record": true,
+      "tee_gl_view": false
+    }
+  ]
+}

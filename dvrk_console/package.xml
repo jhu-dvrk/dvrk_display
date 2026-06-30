@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dvrk_console</name>
+  <version>0.0.0</version>
+  <description>dVRK operator console display, overlay, calibration, and control applications</description>
+  <maintainer email="anton.deguet@jhu.edu">Anton Deguet</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>crtk_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>dvrk_data</depend>
+
+  <build_depend>pkg-config</build_depend>
+  <build_depend>gstreamer-1.0</build_depend>
+  <build_depend>gstreamer-video-1.0</build_depend>
+  <build_depend>gstreamer-app-1.0</build_depend>
+  <build_depend>libjsoncpp-dev</build_depend>
+  <build_depend>libcairo2-dev</build_depend>
+  <build_depend>libgtkmm-3.0-dev</build_depend>
+
+  <exec_depend>gstreamer-1.0</exec_depend>
+  <exec_depend>gstreamer-video-1.0</exec_depend>
+  <exec_depend>gstreamer-app-1.0</exec_depend>
+  <exec_depend>libjsoncpp-dev</exec_depend>
+  <exec_depend>libcairo2</exec_depend>
+  <exec_depend>libgtkmm-3.0-dev</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

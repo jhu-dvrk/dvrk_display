@@ -89,12 +89,14 @@ For latency and correlation, carry both:
 2. Move common config/GStreamer/timestamp helpers into `dvrk_data`.
 3. Move overlay, display output controls, `stereo_display`, and `control_panel`
    into `dvrk_console`.
-4. Keep compatibility aliases for existing executable names where practical:
-   `stereo` -> `stereo_display`, `calibration` -> `stereo_calibrate`.
+4. Use the new executable names directly: `stereo_display` and
+   `stereo_calibrate`.
 5. Extract `stereo_rectify` and `stereo_collate` from the current monolithic
    `stereo` pipeline.
 6. Migrate existing `data_collection` code into `dvrk_data` and remove the
-   external package dependency.
+   external package dependency. Done in the initial package split: `dvrk_data`
+   now builds the recording, extraction, video tagging, latency, configurator,
+   shared timestamp metadata, and GStreamer utility features locally.
 7. Add reconnect and metadata-preservation tests for interprocess video links.
 
 ## Compatibility Notes

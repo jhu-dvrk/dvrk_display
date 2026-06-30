@@ -1,0 +1,17 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/MTMR2/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR2/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR2/gripper/measured_js",
+      "continuous": true
+    }
+  ]
+}

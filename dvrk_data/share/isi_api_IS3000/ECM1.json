@@ -1,0 +1,13 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/ECM1/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/ECM1/measured_cp",
+      "continuous": true
+    }
+  ]
+}

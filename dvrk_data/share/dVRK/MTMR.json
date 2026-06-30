@@ -1,0 +1,29 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/MTMR/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR/measured_cv",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR/setpoint_cp",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR/gripper/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/MTMR/local/measured_cv",
+      "continuous": true
+    }
+  ]
+}

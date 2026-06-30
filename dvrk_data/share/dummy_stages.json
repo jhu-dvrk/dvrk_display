@@ -1,0 +1,12 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "stages": [
+    "approach",
+    "insert",
+    "retract"
+  ],
+  "tags": [
+    "dummy",
+    "test"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/ECM/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/ECM/measured_cv",
+      "continuous": true
+    },
+    {
+      "name": "/ECM/setpoint_cp",
+      "continuous": true
+    },
+    {
+      "name": "/ECM/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/ECM/local/measured_cv",
+      "continuous": true
+    }
+  ]
+}

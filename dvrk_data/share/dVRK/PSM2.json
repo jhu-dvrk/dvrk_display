@@ -1,0 +1,33 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/PSM2/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/measured_cv",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/setpoint_cp",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/jaw/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/jaw/setpoint_js",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/PSM2/local/measured_cv",
+      "continuous": true
+    }
+  ]
+}

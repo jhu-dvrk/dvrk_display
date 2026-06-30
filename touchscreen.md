@@ -340,7 +340,7 @@ If the keyboard still appears for this application, bypass IBus for the
 control panel process:
 
 ```sh
-GTK_IM_MODULE=gtk-im-context-simple ros2 run dvrk_display control_panel -c /path/to/touchscreen.json
+GTK_IM_MODULE=gtk-im-context-simple ros2 run dvrk_console control_panel -c /path/to/touchscreen.json
 ```
 
 Current versions of the control panel executable set this variable internally

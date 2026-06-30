@@ -1,0 +1,47 @@
+{
+  "type": "dvrk_console:stereo_display@1.0.0",
+  "name": "dvrk_display",
+  "dvrk_console_namespace": "console",
+  "preserve_size": true,
+  "sinks": [
+    "glimage"
+  ],
+  "unixfdsinks": [
+    {
+      "stream": "stereo"
+    }
+  ],
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "v4l2src device=/dev/video_v4l2_left",
+      "color": {
+        "brightness": 0.0,
+        "contrast": 1.0,
+        "saturation": 1.0,
+        "hue": 0.0
+      }
+    },
+    "right": {
+      "stream": "v4l2src device=/dev/video_v4l2_right ! videoflip method=rotate-180",
+      "color": {
+        "brightness": 0.0,
+        "contrast": 1.0,
+        "saturation": 1.0,
+        "hue": 0.0
+      }
+    },
+    "crop": {
+      "width": 508,
+      "height": 381
+    },
+    "alignment": {
+      "horizontal_shift_px": -89,
+      "vertical_shift_px": 0
+    }
+  },
+  "display_horizontal_offset_px": 18
+}

@@ -1,0 +1,17 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/console/camera",
+      "continuous": true
+    },
+    {
+      "name": "/console/clutch",
+      "continuous": true
+    },
+    {
+      "name": "/console/operator_present",
+      "continuous": true
+    }
+  ]
+}

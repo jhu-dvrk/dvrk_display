@@ -1,0 +1,28 @@
+{
+  "type": "dvrk_console:stereo_display@1.0.0",
+  "name": "dvrk_display",
+  "dvrk_console_namespace": "console",
+  "sinks": [
+    "glimages"
+  ],
+  "camera": {
+    "size": {
+      "width": 1920,
+      "height": 1080
+    },
+    "left": {
+      "stream": "decklinkvideosrc device-number=0 connection=sdi mode=1080i5994"
+    },
+    "right": {
+      "stream": "decklinkvideosrc device-number=1 connection=sdi mode=1080i5994"
+    },
+    "crop": {
+      "width": 1920,
+      "height": 1080
+    },
+    "alignment": {
+      "horizontal_shift_px": 0,
+      "vertical_shift_px": 0
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "videos": [
+    {
+      "encoding": {
+        "frame_rate": 30,
+        "height": 480,
+        "width": 640
+      },
+      "estimated_latency": 0.1484626329,
+      "name": "main_camera",
+      "stream": "v4l2src device=/dev/video0",
+      "timestamp_overlay": true
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "type": "dvrk_console:stereo_display@1.0.0",
+  "name": "test_extra_streams",
+  "dvrk_console_namespace": "console",
+  "sinks": [
+    "glimage"
+  ],
+  "extra_streams": {
+    "monos": [
+      "videotestsrc pattern=ball is-live=true ! video/x-raw,width=320,height=240,framerate=30/1"
+    ],
+    "stereos": [
+      {
+        "left": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=320,height=240,framerate=30/1",
+        "right": "videotestsrc pattern=colors is-live=true ! video/x-raw,width=320,height=240,framerate=30/1"
+      }
+    ],
+    "scale": 0.3
+  },
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "videotestsrc pattern=snow is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "right": {
+      "stream": "videotestsrc pattern=pinwheel is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "crop": {
+      "width": 640,
+      "height": 480
+    },
+    "alignment": {
+      "horizontal_shift_px": 0,
+      "vertical_shift_px": 0
+    }
+  }
+}

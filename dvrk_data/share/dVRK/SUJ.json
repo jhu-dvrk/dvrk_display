@@ -1,0 +1,57 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "ros_topics": [
+    {
+      "name": "/SUJ/joint_states",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM1/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM1/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM1/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM2/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM2/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM2/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM3/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM3/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/PSM3/local/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/ECM/measured_js",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/ECM/measured_cp",
+      "continuous": true
+    },
+    {
+      "name": "/SUJ/ECM/local/measured_cp",
+      "continuous": true
+    }
+  ]
+}

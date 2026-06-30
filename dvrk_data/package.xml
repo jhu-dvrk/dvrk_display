@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dvrk_data</name>
+  <version>0.0.0</version>
+  <description>dVRK data acquisition, video transport, processing, and collection utilities</description>
+  <maintainer email="anton.deguet@jhu.edu">Anton Deguet</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>rosbag2_cpp</depend>
+
+  <build_depend>pkg-config</build_depend>
+  <build_depend>gstreamer-1.0</build_depend>
+  <build_depend>gstreamer-video-1.0</build_depend>
+  <build_depend>gstreamer-app-1.0</build_depend>
+  <build_depend>gtk+-3.0</build_depend>
+  <build_depend>gtkmm-3.0</build_depend>
+  <build_depend>libjsoncpp-dev</build_depend>
+
+  <exec_depend>python3-cairo</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>gstreamer-1.0</exec_depend>
+  <exec_depend>gstreamer-video-1.0</exec_depend>
+  <exec_depend>gstreamer-app-1.0</exec_depend>
+  <exec_depend>gtk+-3.0</exec_depend>
+  <exec_depend>gtkmm-3.0</exec_depend>
+  <exec_depend>libjsoncpp-dev</exec_depend>
+  <exec_depend>gscam</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

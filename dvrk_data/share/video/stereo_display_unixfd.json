@@ -1,0 +1,15 @@
+{
+  "type": "dvrk_data:record@1.0.0",
+  "videos": [
+    {
+      "name": "dvrk_display_stereo",
+      "unixfd_socket_path": "",
+      "record": true,
+      "timestamp_overlay": false,
+      "side_by_side": "LR",
+      "encoding": {
+        "bitrate": 20000
+      }
+    }
+  ]
+}
