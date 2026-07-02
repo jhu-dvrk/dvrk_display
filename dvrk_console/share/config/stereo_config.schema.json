@@ -4,7 +4,7 @@
   "title": "dvrk_console stereo configuration",
   "description": "Configuration file for the dvrk_console stereo_display executable.",
   "type": "object",
-  "required": ["type", "camera"],
+  "required": ["type"],
   "additionalProperties": false,
   "properties": {
     "type": {
@@ -42,25 +42,30 @@
       "type": "integer",
       "default": 0
     },
+    "stereo": {
+      "type": "object",
+      "required": ["stream"],
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eye_size": {
+          "$ref": "#/definitions/size"
+        },
+        "size": {
+          "$ref": "#/definitions/size"
+        }
+      }
+    },
     "camera": {
       "type": "object",
-      "required": ["size", "left", "right"],
+      "required": [],
       "additionalProperties": false,
       "properties": {
         "size": {
-          "type": "object",
-          "required": ["width", "height"],
-          "additionalProperties": false,
-          "properties": {
-            "width": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "height": {
-              "type": "integer",
-              "minimum": 1
-            }
-          }
+          "$ref": "#/definitions/size"
         },
         "left": {
           "$ref": "#/definitions/cameraStream"
@@ -115,7 +120,7 @@
         "properties": {
           "stream": {
             "type": "string",
-            "enum": ["left", "right", "stereo", "overlay"]
+            "enum": ["stereo", "overlay"]
           },
           "name": {
             "type": "string"
@@ -191,6 +196,21 @@
     }
   },
   "definitions": {
+    "size": {
+      "type": "object",
+      "required": ["width", "height"],
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "cameraStream": {
       "type": "object",
       "required": ["stream"],

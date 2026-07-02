@@ -1,0 +1,26 @@
+{
+  "type": "dvrk_data:stereo_source@1.0.0",
+  "name": "dvrk_test",
+  "unixfdsinks": [
+    {
+      "stream": "left",
+      "socket_path": "/tmp/dvrk_test_left.sock"
+    },
+    {
+      "stream": "right",
+      "socket_path": "/tmp/dvrk_test_right.sock"
+    }
+  ],
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    },
+    "right": {
+      "stream": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+    }
+  }
+}

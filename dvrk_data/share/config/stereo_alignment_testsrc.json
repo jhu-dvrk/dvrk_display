@@ -1,0 +1,30 @@
+{
+  "type": "dvrk_data:stereo_alignment@1.0.0",
+  "name": "dvrk_test",
+  "unixfdsinks": [
+    {
+      "stream": "stereo",
+      "socket_path": "/tmp/dvrk_test_stereo.sock"
+    }
+  ],
+  "camera": {
+    "size": {
+      "width": 640,
+      "height": 480
+    },
+    "left": {
+      "stream": "unixfdsrc socket-path=/tmp/dvrk_test_left.sock do-timestamp=true ! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+    },
+    "right": {
+      "stream": "unixfdsrc socket-path=/tmp/dvrk_test_right.sock do-timestamp=true ! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+    },
+    "crop": {
+      "width": 640,
+      "height": 480
+    },
+    "alignment": {
+      "horizontal_shift_px": 0,
+      "vertical_shift_px": 0
+    }
+  }
+}

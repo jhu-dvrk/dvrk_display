@@ -40,6 +40,7 @@
 #include <dvrk_data/gst_utils.hpp>
 #include "overlay.hpp"
 #include <dvrk_data/cpu_timestamp_meta.hpp>
+#include <dvrk_data/stereo_common.hpp>
 
 namespace {
 
@@ -93,13 +94,6 @@ struct CommandLineOptions {
   GstDebugGraphDetails dot_flags = GST_DEBUG_GRAPH_SHOW_ALL;
 };
 
-struct CropValues {
-  int left = 0;
-  int right = 0;
-  int top = 0;
-  int bottom = 0;
-};
-
 static Glib::RefPtr<Gtk::Application> g_app;
 
 struct FrameTimestampState {
@@ -108,85 +102,6 @@ struct FrameTimestampState {
   gint64 right_source_ts = 0;
   gint64 stereo_output_ts = 0;
 };
-
-int clip_int(const int value, const int min_value, const int max_value) {
-  return std::max(min_value, std::min(max_value, value));
-}
-
-std::pair<int, int> offset_valid_range(const int working_size,
-                                       const int eye_size) {
-  const int crop_total = std::max(0, working_size - eye_size);
-  const int center = crop_total / 2;
-
-  const int min_half = -center;
-  const int max_half = crop_total - center;
-
-  const int min_offset =
-      static_cast<int>(std::ceil(2.0 * static_cast<double>(min_half))) + 1;
-  const int max_offset =
-      static_cast<int>(std::floor(2.0 * static_cast<double>(max_half))) - 1;
-
-  if (min_offset > max_offset) {
-    return {0, 0};
-  }
-  return {min_offset, max_offset};
-}
-
-int clamp_offset_to_valid(const int working_size, const int eye_size,
-                          const int offset_px) {
-  const auto [min_offset, max_offset] =
-      offset_valid_range(working_size, eye_size);
-  return clip_int(offset_px, min_offset, max_offset);
-}
-
-int normalize_eye_size_for_even_crop(const int working_size,
-                                     const int requested_eye_size) {
-  if (working_size <= 0) {
-    return std::max(1, requested_eye_size);
-  }
-
-  int eye_size = clip_int(requested_eye_size, 1, working_size);
-  if (((working_size - eye_size) & 1) != 0) {
-    if (eye_size > 1) {
-      --eye_size;
-    } else if (eye_size < working_size) {
-      ++eye_size;
-    }
-  }
-  return eye_size;
-}
-
-std::pair<int, int> compute_axis_starts(const int crop_total,
-                                        const int offset_px) {
-  const int center = crop_total / 2;
-  const int negative_start =
-      center -
-      static_cast<int>(std::floor(static_cast<double>(offset_px) / 2.0));
-  const int positive_start =
-      center +
-      static_cast<int>(std::ceil(static_cast<double>(offset_px) / 2.0));
-  return {negative_start, positive_start};
-}
-
-CropValues compute_eye_crop(const int working_w, const int working_h,
-                            const int eye_w, const int eye_h,
-                            const int baseline_px, const int vertical_offset_px,
-                            const int sign) {
-  const int crop_x_total = std::max(0, working_w - eye_w);
-  const int crop_y_total = std::max(0, working_h - eye_h);
-
-  const auto [left_start, right_start] =
-      compute_axis_starts(crop_x_total, baseline_px);
-  const auto [top_start, bottom_start] =
-      compute_axis_starts(crop_y_total, vertical_offset_px);
-
-  CropValues crop;
-  crop.left = (sign < 0 ? left_start : right_start) & ~1;
-  crop.right = (crop_x_total - crop.left) & ~1;
-  crop.top = (sign < 0 ? top_start : bottom_start) & ~1;
-  crop.bottom = (crop_y_total - crop.top) & ~1;
-  return crop;
-}
 
 void print_usage(const char *executable) {
   std::cerr << "Usage: " << executable
@@ -271,91 +186,6 @@ bool validate_pipeline(const std::string &stream, const rclcpp::Logger &logger,
   return false;
 }
 
-void warn_if_interlaced_stream(const std::string &stream,
-                               const rclcpp::Logger &logger,
-                               const std::string &name) {
-  if (stream.empty()) {
-    return;
-  }
-
-  const std::string probe_pipeline =
-      stream + " ! queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 "
-               "leaky=downstream"
-               " ! appsink name=__caps_probe_sink__ sync=false async=false "
-               "emit-signals=false drop=true max-buffers=1";
-
-  GError *error = nullptr;
-  GstElement *pipeline = gst_parse_launch(probe_pipeline.c_str(), &error);
-  if (error != nullptr || pipeline == nullptr) {
-    if (error != nullptr) {
-      RCLCPP_WARN(logger, "Unable to probe caps for '%s' stream: %s",
-                  name.c_str(),
-                  error->message != nullptr ? error->message : "unknown error");
-      g_error_free(error);
-    }
-    if (pipeline != nullptr) {
-      gst_object_unref(pipeline);
-    }
-    return;
-  }
-
-  GstElement *probe_sink =
-      gst_bin_get_by_name(GST_BIN(pipeline), "__caps_probe_sink__");
-  if (probe_sink == nullptr) {
-    gst_object_unref(pipeline);
-    RCLCPP_WARN(logger,
-                "Unable to probe caps for '%s' stream: missing probe sink",
-                name.c_str());
-    return;
-  }
-
-  gst_element_set_state(pipeline, GST_STATE_PLAYING);
-  GstSample *sample =
-      gst_app_sink_try_pull_sample(GST_APP_SINK(probe_sink), 2 * GST_SECOND);
-
-  if (sample != nullptr) {
-    GstCaps *caps = gst_sample_get_caps(sample);
-    if (caps != nullptr && gst_caps_get_size(caps) > 0) {
-      const GstStructure *structure = gst_caps_get_structure(caps, 0);
-      const gchar *interlace_mode =
-          gst_structure_get_string(structure, "interlace-mode");
-      if (interlace_mode != nullptr &&
-          std::strcmp(interlace_mode, "progressive") != 0) {
-        RCLCPP_WARN(logger,
-                    "%s stream caps report interlace-mode='%s'. Consider "
-                    "adding deinterlace to this stream in the config.",
-                    name.c_str(), interlace_mode);
-      }
-    }
-    gst_sample_unref(sample);
-  }
-
-  gst_element_set_state(pipeline, GST_STATE_NULL);
-  gst_object_unref(probe_sink);
-  gst_object_unref(pipeline);
-}
-
-std::string resolve_unixfd_socket_path(const std::string &viewer_name,
-                                      const sv::UnixfdSinkConfig &sink) {
-  if (!sink.socket_path.empty()) {
-    return sink.socket_path;
-  }
-
-  const char *username = getenv("USER");
-  if (!username) {
-    struct passwd *pw = getpwuid(getuid());
-    username = pw ? pw->pw_name : "unknown";
-  }
-
-  std::string suffix = sink.name;
-  if (suffix.empty()) {
-    suffix = sink.stream;
-  }
-
-  return "/tmp/" + viewer_name + "_" + suffix + "_" + std::string(username) +
-         ".sock";
-}
-
 bool check_element_available(const std::string &element_name) {
   GstElementFactory *factory = gst_element_factory_find(element_name.c_str());
   if (factory) {
@@ -369,73 +199,32 @@ std::string get_unixfd_upload_chain() {
   return "gldownload ! videoconvert ! video/x-raw,format=I420";
 }
 
-void add_unique_path(std::vector<std::string> &paths, const std::string &path) {
-  if (path.empty()) {
-    return;
+std::string resolve_unixfd_socket_path(const std::string &app_name,
+                                       const sv::UnixfdSinkConfig &sink) {
+  if (!sink.socket_path.empty()) {
+    return sink.socket_path;
   }
-  if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
-    paths.push_back(path);
+  const char *username = getenv("USER");
+  if (!username) {
+    struct passwd *pw = getpwuid(getuid());
+    username = pw ? pw->pw_name : "unknown";
   }
+  const std::string suffix = sink.name.empty() ? sink.stream : sink.name;
+  return "/tmp/" + app_name + "_" + suffix + "_" + std::string(username) + ".sock";
 }
 
-void collect_unixfdsrc_socket_paths(const std::string &fragment,
-                                    std::vector<std::string> &paths) {
-  std::size_t cursor = 0;
-  while (cursor < fragment.size()) {
-    const std::size_t src_pos = fragment.find("unixfdsrc", cursor);
-    if (src_pos == std::string::npos) {
-      break;
-    }
-
-    const std::size_t next_src = fragment.find("unixfdsrc", src_pos + 9);
-    const std::size_t search_end =
-        next_src == std::string::npos ? fragment.size() : next_src;
-    const std::size_t prop_pos = fragment.find("socket-path=", src_pos);
-    if (prop_pos != std::string::npos && prop_pos < search_end) {
-      std::size_t value_pos = prop_pos + std::strlen("socket-path=");
-      std::string path;
-      if (value_pos < fragment.size() &&
-          (fragment[value_pos] == '"' || fragment[value_pos] == '\'')) {
-        const char quote = fragment[value_pos++];
-        const std::size_t end_quote = fragment.find(quote, value_pos);
-        if (end_quote != std::string::npos) {
-          path = fragment.substr(value_pos, end_quote - value_pos);
-        }
-      } else {
-        std::size_t value_end = value_pos;
-        while (value_end < fragment.size() &&
-               !std::isspace(
-                   static_cast<unsigned char>(fragment[value_end])) &&
-               fragment[value_end] != '!') {
-          ++value_end;
-        }
-        path = fragment.substr(value_pos, value_end - value_pos);
-      }
-      add_unique_path(paths, path);
-    }
-
-    cursor = src_pos + 9;
-  }
-}
 
 void warn_missing_unixfd_source_sockets(const sv::AppConfig &cfg,
                                         const rclcpp::Logger &logger) {
-  std::vector<std::string> socket_paths;
-  collect_unixfdsrc_socket_paths(cfg.left.source, socket_paths);
-  collect_unixfdsrc_socket_paths(cfg.right.source, socket_paths);
-  for (const auto &mono : cfg.extra_streams.monos) {
-    collect_unixfdsrc_socket_paths(mono, socket_paths);
-  }
-  for (const auto &stereo : cfg.extra_streams.stereos) {
-    collect_unixfdsrc_socket_paths(stereo.left, socket_paths);
-    collect_unixfdsrc_socket_paths(stereo.right, socket_paths);
-  }
-  if (cfg.ar.enabled) {
-    add_unique_path(socket_paths, cfg.ar.left_socket);
-    add_unique_path(socket_paths, cfg.ar.right_socket);
-  }
-
-  for (const auto &path : socket_paths) {
+  for (const auto &src : cfg.unixfd_sources) {
+    const char *username = getenv("USER");
+    if (!username) {
+      struct passwd *pw = getpwuid(getuid());
+      username = pw ? pw->pw_name : "unknown";
+    }
+    const std::string path = src.socket_path.empty()
+        ? "/tmp/" + cfg.name + "_" + src.name + "_" + std::string(username) + ".sock"
+        : src.socket_path;
     if (!std::filesystem::exists(path)) {
       RCLCPP_WARN(
           logger,
@@ -483,6 +272,16 @@ GstPadProbeReturn frame_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info,
       } else if (element_name == "__right_src_q__") {
         timestamps.right_source_ts = now;
         state->right_source_ts = now;
+      } else if (element_name == "__stereo_src_q__") {
+        if (timestamps.left_source_ts != 0) {
+          state->left_source_ts = timestamps.left_source_ts;
+        }
+        if (timestamps.right_source_ts != 0) {
+          state->right_source_ts = timestamps.right_source_ts;
+        }
+        if (timestamps.stereo_output_ts != 0) {
+          state->stereo_output_ts = timestamps.stereo_output_ts;
+        }
       } else {
         if (timestamps.left_source_ts == 0) {
           timestamps.left_source_ts = state->left_source_ts;
@@ -564,24 +363,13 @@ void attach_ar_timestamp_probes(GstElement *pipeline) {
 
 void attach_timestamp_probes(GstElement *pipeline, const sv::AppConfig &cfg,
                              FrameTimestampState *timestamp_state) {
-  add_timestamp_probe(pipeline, "__left_src_q__", timestamp_state);
-  add_timestamp_probe(pipeline, "__right_src_q__", timestamp_state);
+  add_timestamp_probe(pipeline, "__stereo_src_q__", timestamp_state);
   add_timestamp_probe(pipeline, "__stereo_overlay_input_ts_q__", timestamp_state);
 
-  int left_index = 0;
-  int right_index = 0;
   int stereo_index = 0;
   int overlay_index = 0;
   for (const auto &sink : cfg.unixfd_sinks) {
-    if (sink.stream == "left") {
-      add_timestamp_probe(
-          pipeline, "__left_unixfd_ts_q" + std::to_string(left_index++) + "__",
-          timestamp_state);
-    } else if (sink.stream == "right") {
-      add_timestamp_probe(
-          pipeline, "__right_unixfd_ts_q" + std::to_string(right_index++) + "__",
-          timestamp_state);
-    } else if (sink.stream == "stereo") {
+    if (sink.stream == "stereo") {
       add_timestamp_probe(
           pipeline,
           "__stereo_unixfd_ts_q" + std::to_string(stereo_index++) + "__",
@@ -612,329 +400,51 @@ gboolean on_ros_spin(gpointer user_data) {
   return G_SOURCE_CONTINUE;
 }
 
-gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
-  if (msg == nullptr) {
-    return G_SOURCE_CONTINUE;
-  }
-
-  auto *node = static_cast<rclcpp::Node *>(user_data);
-
-  if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
-    RCLCPP_INFO(node->get_logger(), "GStreamer bus: received EOS");
-    if (g_app) {
-      g_app->quit();
-    }
-  } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
-    GError *err = nullptr;
-    gchar *dbg = nullptr;
-    gst_message_parse_error(msg, &err, &dbg);
-    RCLCPP_ERROR(node->get_logger(), "GStreamer error: %s", (err ? err->message : "unknown"));
-    if (dbg != nullptr) {
-      RCLCPP_ERROR(node->get_logger(), "Debug details: %s", dbg);
-      g_free(dbg);
-    }
-    if (err != nullptr) {
-      g_error_free(err);
-    }
-    if (g_app) {
-      g_app->quit();
-    }
-  } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_WARNING) {
-    GError *err = nullptr;
-    gchar *dbg = nullptr;
-    gst_message_parse_warning(msg, &err, &dbg);
-    RCLCPP_WARN(node->get_logger(), "GStreamer warning: %s",
-                (err ? err->message : "unknown"));
-    if (dbg != nullptr) {
-      RCLCPP_WARN(node->get_logger(), "Debug details: %s", dbg);
-      g_free(dbg);
-    }
-    if (err != nullptr) {
-      g_error_free(err);
-    }
-  }
-
-  return G_SOURCE_CONTINUE;
-}
-
-std::string color_adjustment_string(const sv::ColorAdjustment &color) {
-  if (color.brightness == 0.0 && color.contrast == 1.0 &&
-      color.saturation == 1.0 && color.hue == 0.0) {
-    return "";
-  }
-  return " ! videobalance brightness=" + std::to_string(color.brightness) +
-         " contrast=" + std::to_string(color.contrast) +
-         " saturation=" + std::to_string(color.saturation) +
-         " hue=" + std::to_string(color.hue);
-}
+// Removed local on_bus_message in favor of dc_stereo::on_bus_message
 
 // Helper: ensure a pixel count is even (round down)
 static int make_even(int v) { return v & ~1; }
 
 std::string
 build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
-  int base_crop_w =
-      stereo.crop_width > 0 ? stereo.crop_width : stereo.original_width;
-  int base_crop_h =
-      stereo.crop_height > 0 ? stereo.crop_height : stereo.original_height;
-  base_crop_w =
-      normalize_eye_size_for_even_crop(stereo.original_width, base_crop_w);
-  base_crop_h =
-      normalize_eye_size_for_even_crop(stereo.original_height, base_crop_h);
-
-  int aspect_crop_l = 0, aspect_crop_r = 0, aspect_crop_t = 0,
-      aspect_crop_b = 0;
-
-  if (stereo.preserve_size && stereo.original_width > 0 &&
-      stereo.original_height > 0) {
-    double orig_aspect = static_cast<double>(stereo.original_width) /
-                         static_cast<double>(stereo.original_height);
-    int w_c_prime = std::min(
-        base_crop_w, static_cast<int>(std::round(base_crop_h * orig_aspect)));
-    int h_c_prime = std::min(
-        base_crop_h, static_cast<int>(std::round(base_crop_w / orig_aspect)));
-
-    int diff_x = base_crop_w - w_c_prime;
-    int diff_y = base_crop_h - h_c_prime;
-
-    // Round up to even so the resulting crop dimensions stay even (required
-    // for I420/NV12 planar formats; odd widths/heights cause chroma artifacts).
-    diff_x = (diff_x + 1) & ~1;
-    diff_y = (diff_y + 1) & ~1;
-
-    aspect_crop_l = diff_x / 2;
-    aspect_crop_r = diff_x - aspect_crop_l;
-    aspect_crop_t = diff_y / 2;
-    aspect_crop_b = diff_y - aspect_crop_t;
-  }
-
-  const int eye_w = stereo.preserve_size ? stereo.original_width : base_crop_w;
-  const int eye_h = stereo.preserve_size ? stereo.original_height : base_crop_h;
+  const int eye_w = stereo.original_width;
+  const int eye_h = stereo.original_height;
+  const int stereo_w = 2 * eye_w;
 
   const bool has_glimage = std::find(stereo.sinks.begin(), stereo.sinks.end(),
                                      "glimage") != stereo.sinks.end();
   const bool has_glimages = std::find(stereo.sinks.begin(), stereo.sinks.end(),
                                       "glimages") != stereo.sinks.end();
 
-  int horizontal_shift_px = clamp_offset_to_valid(
-      stereo.original_width, base_crop_w, stereo.horizontal_shift_px);
-  int vertical_shift_px = clamp_offset_to_valid(
-      stereo.original_height, base_crop_h, stereo.vertical_shift_px);
-
-  CropValues left_crop = compute_eye_crop(
-      stereo.original_width, stereo.original_height, base_crop_w, base_crop_h,
-      horizontal_shift_px, vertical_shift_px, -1);
-
-  CropValues right_crop = compute_eye_crop(
-      stereo.original_width, stereo.original_height, base_crop_w, base_crop_h,
-      horizontal_shift_px, vertical_shift_px, 1);
-
-  if (stereo.preserve_size) {
-    left_crop.left += aspect_crop_l;
-    left_crop.right += aspect_crop_r;
-    left_crop.top += aspect_crop_t;
-    left_crop.bottom += aspect_crop_b;
-
-    right_crop.left += aspect_crop_l;
-    right_crop.right += aspect_crop_r;
-    right_crop.top += aspect_crop_t;
-    right_crop.bottom += aspect_crop_b;
-  }
-
-  // Fold display_horizontal_offset_px into each eye's crop window so
-  // the mixer stays a plain side-by-side compositor with no xpos shifting.
-  {
-    const int disp = stereo.display_horizontal_offset_px;
-    const int disp_half_lo = disp / 2;
-    const int disp_half_hi = disp - disp_half_lo;
-
-    const int left_shift = std::min(disp_half_lo, left_crop.left);
-    left_crop.left  -= left_shift;
-    left_crop.right += left_shift;
-
-    const int right_shift = std::min(disp_half_hi, right_crop.right);
-    right_crop.left  += right_shift;
-    right_crop.right -= right_shift;
-  }
-
-  std::string scale_suffix = "";
-  if (stereo.preserve_size && stereo.original_width > 0 &&
-      stereo.original_height > 0) {
-    scale_suffix = " ! videoscale ! video/x-raw,width=" +
-                   std::to_string(stereo.original_width) +
-                   ",height=" + std::to_string(stereo.original_height);
-  }
-
-  std::vector<sv::UnixfdSinkConfig> left_unixfd_sinks;
-  for (const auto &sink : stereo.unixfd_sinks) {
-    if (sink.stream == "left") {
-      left_unixfd_sinks.push_back(sink);
-    }
-  }
-
-  std::string left_chain =
-      stereo.left.source +
-      " ! queue name=__left_src_q__ max-size-buffers=8 leaky=downstream " +
-      color_adjustment_string(stereo.left_color) +
-      " ! videocrop left=" + std::to_string(left_crop.left) +
-      " right=" + std::to_string(left_crop.right) +
-      " top=" + std::to_string(left_crop.top) +
-      " bottom=" + std::to_string(left_crop.bottom) + scale_suffix;
-
-  const bool need_left_tee = !left_unixfd_sinks.empty();
-
-  if (need_left_tee) {
-    left_chain += " ! tee name=__left_out__"
-                  " __left_out__. ! queue max-size-buffers=1 leaky=downstream "
-                  "! glupload";
-  } else {
-    left_chain += " ! glupload";
-  }
-
-  if (stereo.ar.enabled && !stereo.ar.left_socket.empty()) {
-    std::string left_ar_socket = stereo.ar.left_socket;
-    left_chain += " ! left_ar_mix.sink_0 ";
-    left_chain += "glvideomixer name=left_ar_mix background=1 force-live=true"
-                  " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0 sink_0::width=" + std::to_string(eye_w) +
-                  " sink_0::height=" + std::to_string(eye_h) +
-                  " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0 sink_1::width=" + std::to_string(eye_w) +
-                  " sink_1::height=" + std::to_string(eye_h) + " ";
-    std::string alpha_str = "";
-    if (stereo.ar.use_color_key) {
-      alpha_str = " ! alpha method=custom target-r=" + std::to_string(stereo.ar.color_key_r) +
-                  " target-g=" + std::to_string(stereo.ar.color_key_g) +
-                  " target-b=" + std::to_string(stereo.ar.color_key_b) + " ";
-    }
-    left_chain += "unixfdsrc name=left_ar_src socket-path=" + left_ar_socket + " do-timestamp=true"
-                  " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
-                  " ! videoconvert ! video/x-raw,format=RGBA" + alpha_str +
-                  " ! glupload ! left_ar_mix.sink_1 ";
-    left_chain += "left_ar_mix. ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
-                  ",height=" + std::to_string(eye_h) + " ! mix.sink_0";
-  } else {
-    left_chain += " ! mix.sink_0";
-  }
-
-  if (need_left_tee) {
-    int left_unixfd_index = 0;
-    for (const auto &sink : left_unixfd_sinks) {
-      const std::string socket_path =
-          resolve_unixfd_socket_path(stereo.name, sink);
-      left_chain += " __left_out__. ! queue max-size-buffers=2 "
-                    "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                    " ! videoconvert ! video/x-raw,format=I420"
-                    " ! queue name=__left_unixfd_ts_q" +
-                    std::to_string(left_unixfd_index++) +
-                    "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                    "leaky=downstream ! unixfdsink socket-path=" +
-                    socket_path + " sync=true async=false";
-    }
-  }
-
-  std::vector<sv::UnixfdSinkConfig> right_unixfd_sinks;
-  for (const auto &sink : stereo.unixfd_sinks) {
-    if (sink.stream == "right") {
-      right_unixfd_sinks.push_back(sink);
-    }
-  }
-
-  std::string right_chain =
-      stereo.right.source +
-      " ! queue name=__right_src_q__ max-size-buffers=8 leaky=downstream " +
-      color_adjustment_string(stereo.right_color) +
-      " ! videocrop left=" + std::to_string(right_crop.left) +
-      " right=" + std::to_string(right_crop.right) +
-      " top=" + std::to_string(right_crop.top) +
-      " bottom=" + std::to_string(right_crop.bottom) + scale_suffix;
-
-  const bool need_right_tee = !right_unixfd_sinks.empty();
-
-  if (need_right_tee) {
-    right_chain += " ! tee name=__right_out__"
-                   " __right_out__. ! queue max-size-buffers=1 "
-                   "leaky=downstream ! glupload";
-  } else {
-    right_chain += " ! glupload";
-  }
-
-  if (stereo.ar.enabled && !stereo.ar.right_socket.empty()) {
-    std::string right_ar_socket = stereo.ar.right_socket;
-    right_chain += " ! right_ar_mix.sink_0 ";
-    right_chain += "glvideomixer name=right_ar_mix background=1 force-live=true"
-                   " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0 sink_0::width=" + std::to_string(eye_w) +
-                   " sink_0::height=" + std::to_string(eye_h) +
-                   " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0 sink_1::width=" + std::to_string(eye_w) +
-                   " sink_1::height=" + std::to_string(eye_h) + " ";
-    std::string alpha_str = "";
-    if (stereo.ar.use_color_key) {
-      alpha_str = " ! alpha method=custom target-r=" + std::to_string(stereo.ar.color_key_r) +
-                  " target-g=" + std::to_string(stereo.ar.color_key_g) +
-                  " target-b=" + std::to_string(stereo.ar.color_key_b) + " ";
-    }
-    right_chain += "unixfdsrc name=right_ar_src socket-path=" + right_ar_socket + " do-timestamp=true"
-                   " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream"
-                   " ! videoconvert ! video/x-raw,format=RGBA" + alpha_str +
-                   " ! glupload ! right_ar_mix.sink_1 ";
-    right_chain += "right_ar_mix. ! video/x-raw(memory:GLMemory),width=" + std::to_string(eye_w) +
-                   ",height=" + std::to_string(eye_h) + " ! mix.sink_1";
-  } else {
-    right_chain += " ! mix.sink_1";
-  }
-
-  if (need_right_tee) {
-    int right_unixfd_index = 0;
-    for (const auto &sink : right_unixfd_sinks) {
-      const std::string socket_path =
-          resolve_unixfd_socket_path(stereo.name, sink);
-      right_chain += " __right_out__. ! queue max-size-buffers=2 "
-                     "max-size-time=0 max-size-bytes=0 leaky=downstream"
-                     " ! videoconvert ! video/x-raw,format=I420"
-                     " ! queue name=__right_unixfd_ts_q" +
-                     std::to_string(right_unixfd_index++) +
-                     "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                     "leaky=downstream ! unixfdsink socket-path=" +
-                     socket_path + " sync=true async=false";
-    }
-  }
-
-
-  // -----------------------------------------------------------------------
-  // Extra mono streams layout
-  // -----------------------------------------------------------------------
   const auto &es = stereo.extra_streams;
   const int n_mono = static_cast<int>(es.monos.size());
   const int n_stereo = static_cast<int>(es.stereos.size());
   const int n_extra_streams = n_mono + n_stereo;
   const bool has_extra = n_extra_streams > 0 && es.scale > 0.01;
+  const bool has_ar = stereo.ar.enabled &&
+                      (!stereo.ar.left_socket.empty() ||
+                       !stereo.ar.right_socket.empty());
+  const bool split_stereo_for_presentation = has_extra || has_ar;
 
-  // stereo_h: height occupied by the stereo region in the final eye frame
-  // extra_h:  remaining height for mono streams
-  // gap_px:   black spacer between regions and between streams
   int stereo_h = eye_h;
-  int extra_h  = 0;
-  int gap_px   = 0;
-
+  int extra_h = 0;
+  int gap_px = 0;
   if (has_extra) {
-    gap_px   = sv::AppConfig::gap_px;
-    stereo_h = make_even(static_cast<int>(std::round(eye_h * (1.0 - es.scale))));
+    gap_px = sv::AppConfig::gap_px;
+    stereo_h =
+        make_even(static_cast<int>(std::round(eye_h * (1.0 - es.scale))));
     stereo_h = std::max(2, std::min(eye_h - 2, stereo_h));
-    extra_h  = eye_h - stereo_h; // includes the gap row
+    extra_h = eye_h - stereo_h;
   }
 
-  // slot_w: width of each extra stream within one eye's view
   int slot_w = 0;
   if (has_extra && n_extra_streams > 0) {
-    slot_w = make_even((eye_w - (n_extra_streams - 1) * gap_px) / n_extra_streams);
+    slot_w =
+        make_even((eye_w - (n_extra_streams - 1) * gap_px) / n_extra_streams);
     slot_w = std::max(2, slot_w);
   }
-  // height of the visible mono content (extra_h minus top gap)
   const int mono_h = has_extra ? std::max(2, extra_h - gap_px) : 0;
 
-  // Mono source chains: each stream is tee'd so it can feed both left and
-  // right eye compositors (and the combined stereo compositor).
-  // We do NOT glupload before the tee — keep in CPU memory so downstream
-  // videoscale elements can work without gldownload/glupload round-trips.
-  // -----------------------------------------------------------------------
   std::string extra_chains;
   if (has_extra) {
     for (int i = 0; i < n_mono; ++i) {
@@ -958,36 +468,138 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     }
   }
 
-  // Helper: append branches from extra tees into a named glvideomixer.
-  // mix_name:  name of the destination glvideomixer
-  // start_sink: first sink index (sink_0 is already used by stereo)
-  // is_left_eye: true if this compositor is for the left eye
-  auto append_extra_branches = [&](std::string &chain, const std::string &mix_name,
+  auto append_extra_branches = [&](std::string &chain,
+                                   const std::string &mix_name,
                                    int start_sink, bool is_left_eye) {
     for (int i = 0; i < n_mono; ++i) {
       const int sink_idx = start_sink + i;
       chain += " __extra_mono" + std::to_string(i) + "__. "
                "! queue max-size-buffers=2 leaky=downstream"
-               " ! glupload ! " + mix_name + ".sink_" + std::to_string(sink_idx) + " ";
+               " ! glupload ! " + mix_name + ".sink_" +
+               std::to_string(sink_idx) + " ";
     }
     for (int i = 0; i < n_stereo; ++i) {
       const int sink_idx = start_sink + n_mono + i;
-      std::string tee_name = is_left_eye ? "__extra_stereo_left" : "__extra_stereo_right";
+      const std::string tee_name =
+          is_left_eye ? "__extra_stereo_left" : "__extra_stereo_right";
       chain += " " + tee_name + std::to_string(i) + "__. "
                "! queue max-size-buffers=2 leaky=downstream"
-               " ! glupload ! " + mix_name + ".sink_" + std::to_string(sink_idx) + " ";
+               " ! glupload ! " + mix_name + ".sink_" +
+               std::to_string(sink_idx) + " ";
     }
   };
 
-  std::string output_chain =
-      "glvideomixer name=mix background=1"
-      " sink_0::xpos=0 sink_0::width=" + std::to_string(eye_w) +
-      " sink_0::height=" + std::to_string(eye_h) +
-      " sink_1::xpos=" + std::to_string(eye_w) +
-      " sink_1::width=" + std::to_string(eye_w) +
-      " sink_1::height=" + std::to_string(eye_h) +
-      " ! video/x-raw(memory:GLMemory),width=" + std::to_string(2 * eye_w) +
+  std::string input_chain;
+  std::string presentation_chain;
+  const std::string normalized_stereo_caps =
+      " ! videoconvert ! video/x-raw,width=" + std::to_string(stereo_w) +
       ",height=" + std::to_string(eye_h);
+
+  if (split_stereo_for_presentation) {
+    input_chain =
+        stereo.stereo.source +
+        " ! queue name=__stereo_src_q__ max-size-buffers=8 "
+        "max-size-time=0 max-size-bytes=0 leaky=downstream" +
+        normalized_stereo_caps + " ! tee name=__clean_stereo__ ";
+
+    std::string left_chain =
+        " __clean_stereo__. ! queue max-size-buffers=2 leaky=downstream"
+        " ! videocrop left=0 right=" + std::to_string(eye_w) +
+        " top=0 bottom=0 ! video/x-raw,width=" + std::to_string(eye_w) +
+        ",height=" + std::to_string(eye_h) + " ! glupload";
+
+    if (stereo.ar.enabled && !stereo.ar.left_socket.empty()) {
+      left_chain += " ! left_ar_mix.sink_0 ";
+      left_chain +=
+          "glvideomixer name=left_ar_mix background=1 force-live=true"
+          " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0"
+          " sink_0::width=" +
+          std::to_string(eye_w) + " sink_0::height=" +
+          std::to_string(eye_h) +
+          " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0"
+          " sink_1::width=" +
+          std::to_string(eye_w) + " sink_1::height=" +
+          std::to_string(eye_h) + " ";
+      std::string alpha_str;
+      if (stereo.ar.use_color_key) {
+        alpha_str = " ! alpha method=custom target-r=" +
+                    std::to_string(stereo.ar.color_key_r) +
+                    " target-g=" + std::to_string(stereo.ar.color_key_g) +
+                    " target-b=" + std::to_string(stereo.ar.color_key_b);
+      }
+      left_chain +=
+          "unixfdsrc name=left_ar_src socket-path=" + stereo.ar.left_socket +
+          " socket-type=abstract do-timestamp=true"
+          " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
+          " leaky=downstream"
+          " ! videoconvert ! video/x-raw,format=RGBA" +
+          alpha_str + " ! glupload ! left_ar_mix.sink_1 ";
+      left_chain +=
+          "left_ar_mix. ! video/x-raw(memory:GLMemory),width=" +
+          std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+          " ! mix.sink_0";
+    } else {
+      left_chain += " ! mix.sink_0";
+    }
+
+    std::string right_chain =
+        " __clean_stereo__. ! queue max-size-buffers=2 leaky=downstream"
+        " ! videocrop left=" + std::to_string(eye_w) +
+        " right=0 top=0 bottom=0 ! video/x-raw,width=" +
+        std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+        " ! glupload";
+
+    if (stereo.ar.enabled && !stereo.ar.right_socket.empty()) {
+      right_chain += " ! right_ar_mix.sink_0 ";
+      right_chain +=
+          "glvideomixer name=right_ar_mix background=1 force-live=true"
+          " sink_0::zorder=1 sink_0::xpos=0 sink_0::ypos=0"
+          " sink_0::width=" +
+          std::to_string(eye_w) + " sink_0::height=" +
+          std::to_string(eye_h) +
+          " sink_1::zorder=2 sink_1::xpos=0 sink_1::ypos=0"
+          " sink_1::width=" +
+          std::to_string(eye_w) + " sink_1::height=" +
+          std::to_string(eye_h) + " ";
+      std::string alpha_str;
+      if (stereo.ar.use_color_key) {
+        alpha_str = " ! alpha method=custom target-r=" +
+                    std::to_string(stereo.ar.color_key_r) +
+                    " target-g=" + std::to_string(stereo.ar.color_key_g) +
+                    " target-b=" + std::to_string(stereo.ar.color_key_b);
+      }
+      right_chain +=
+          "unixfdsrc name=right_ar_src socket-path=" + stereo.ar.right_socket +
+          " socket-type=abstract do-timestamp=true"
+          " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0"
+          " leaky=downstream"
+          " ! videoconvert ! video/x-raw,format=RGBA" +
+          alpha_str + " ! glupload ! right_ar_mix.sink_1 ";
+      right_chain +=
+          "right_ar_mix. ! video/x-raw(memory:GLMemory),width=" +
+          std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+          " ! mix.sink_1";
+    } else {
+      right_chain += " ! mix.sink_1";
+    }
+
+    input_chain += left_chain + right_chain;
+    presentation_chain =
+        " glvideomixer name=mix background=1"
+        " sink_0::xpos=0 sink_0::width=" +
+        std::to_string(eye_w) + " sink_0::height=" + std::to_string(eye_h) +
+        " sink_1::xpos=" + std::to_string(eye_w) +
+        " sink_1::width=" + std::to_string(eye_w) +
+        " sink_1::height=" + std::to_string(eye_h) +
+        " ! video/x-raw(memory:GLMemory),width=" + std::to_string(stereo_w) +
+        ",height=" + std::to_string(eye_h);
+  } else {
+    presentation_chain =
+        stereo.stereo.source +
+        " ! queue name=__stereo_src_q__ max-size-buffers=8 "
+        "max-size-time=0 max-size-bytes=0 leaky=downstream" +
+        normalized_stereo_caps + " ! glupload ! glcolorconvert";
+  }
 
   std::vector<sv::UnixfdSinkConfig> stereo_unixfd_sinks;
   std::vector<sv::UnixfdSinkConfig> overlay_unixfd_sinks;
@@ -999,24 +611,22 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     }
   }
 
-
   const bool has_display_output = has_glimage || has_glimages;
+  const int stereo_branches = (has_display_output ? 1 : 0) +
+                              stereo_unixfd_sinks.size() +
+                              (overlay_unixfd_sinks.empty() ? 0 : 1);
 
-  int stereo_branches = (has_display_output ? 1 : 0) +
-                        stereo_unixfd_sinks.size() +
-                        (overlay_unixfd_sinks.empty() ? 0 : 1);
-
-
+  std::string output_chain = presentation_chain;
   if (stereo_branches > 0) {
     if (stereo_branches > 1) {
       output_chain += " ! tee name=__stereo_out__ ";
     }
-    
+
     if (has_display_output) {
       if (stereo_branches > 1) {
-        output_chain += " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
+        output_chain +=
+            " __stereo_out__. ! queue max-size-buffers=1 leaky=downstream";
       } else {
-        // Preserve non-blocking behavior for the single display branch.
         output_chain += " ! queue max-size-buffers=1 leaky=downstream";
       }
 
@@ -1025,50 +635,55 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
           output_chain +=
               " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay"
               " ! videoconvert ! video/x-raw,format=RGBA,width=" +
-              std::to_string(2 * eye_w) + ",height=" + std::to_string(eye_h) +
+              std::to_string(stereo_w) + ",height=" + std::to_string(eye_h) +
               " ! tee name=__stereo_split__ ";
         } else {
-          output_chain += " ! gldownload ! videoconvert ! video/x-raw,format=RGBA,width=" +
-                          std::to_string(2 * eye_w) + ",height=" + std::to_string(eye_h) +
-                          " ! tee name=__stereo_split__ ";
+          output_chain +=
+              " ! gldownload ! videoconvert ! video/x-raw,format=RGBA,width=" +
+              std::to_string(stereo_w) + ",height=" + std::to_string(eye_h) +
+              " ! tee name=__stereo_split__ ";
         }
-        // Left half (crops out the right half)
-        output_chain += " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
-                        " ! videocrop left=0 right=" + std::to_string(eye_w) + " top=0 bottom=0 "
-                        " ! video/x-raw,format=RGBA,width=" + std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
-                        " ! glupload ! __stereo_comp__.sink_0 ";
-        // Right half (crops out the left half)
-        output_chain += " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
-                        " ! videocrop left=" + std::to_string(eye_w) + " right=0 top=0 bottom=0 "
-                        " ! video/x-raw,format=RGBA,width=" + std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
-                        " ! glupload ! __stereo_comp__.sink_1 ";
-        // Extra branches — left half uses sink_2..n_extra_streams+1
-        // and right half uses sink_n_extra_streams+2..2*n_extra_streams+1
+        output_chain +=
+            " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
+            " ! videocrop left=0 right=" +
+            std::to_string(eye_w) +
+            " top=0 bottom=0 ! video/x-raw,format=RGBA,width=" +
+            std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+            " ! glupload ! __stereo_comp__.sink_0 ";
+        output_chain +=
+            " __stereo_split__. ! queue max-size-buffers=1 leaky=downstream"
+            " ! videocrop left=" +
+            std::to_string(eye_w) +
+            " right=0 top=0 bottom=0 ! video/x-raw,format=RGBA,width=" +
+            std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+            " ! glupload ! __stereo_comp__.sink_1 ";
         append_extra_branches(output_chain, "__stereo_comp__", 2, true);
-        append_extra_branches(output_chain, "__stereo_comp__", 2 + n_extra_streams, false);
+        append_extra_branches(output_chain, "__stereo_comp__",
+                              2 + n_extra_streams, false);
 
-        // Build the combined stereo compositor description
         std::string comp_desc =
             "glvideomixer name=__stereo_comp__ background=1"
             " sink_0::xpos=0 sink_0::ypos=0"
-            " sink_0::width=" + std::to_string(eye_w) +
-            " sink_0::height=" + std::to_string(stereo_h) +
+            " sink_0::width=" +
+            std::to_string(eye_w) + " sink_0::height=" +
+            std::to_string(stereo_h) +
             " sink_0::sizing-policy=1"
-            " sink_1::xpos=" + std::to_string(eye_w) + " sink_1::ypos=0"
-            " sink_1::width=" + std::to_string(eye_w) +
-            " sink_1::height=" + std::to_string(stereo_h) +
-            " sink_1::sizing-policy=1";
+            " sink_1::xpos=" +
+            std::to_string(eye_w) +
+            " sink_1::ypos=0"
+            " sink_1::width=" +
+            std::to_string(eye_w) + " sink_1::height=" +
+            std::to_string(stereo_h) + " sink_1::sizing-policy=1";
         const int disp = stereo.display_horizontal_offset_px;
         const int disp_half_lo = disp / 2;
         const int disp_half_hi = disp - disp_half_lo;
         for (int i = 0; i < n_extra_streams; ++i) {
           const int base_x = i * (slot_w + gap_px);
-          const int left_x = std::max(0, std::min(eye_w - slot_w,
-                                                   base_x - disp_half_lo));
-          const int right_x = std::max(eye_w,
-                                       std::min((2 * eye_w) - slot_w,
-                                                eye_w + base_x + disp_half_hi));
-          // Left half
+          const int left_x =
+              std::max(0, std::min(eye_w - slot_w, base_x - disp_half_lo));
+          const int right_x = std::max(
+              eye_w, std::min(stereo_w - slot_w,
+                              eye_w + base_x + disp_half_hi));
           comp_desc +=
               " sink_" + std::to_string(2 + i) +
               "::xpos=" + std::to_string(left_x) +
@@ -1080,7 +695,6 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
               "::height=" + std::to_string(mono_h) +
               " sink_" + std::to_string(2 + i) + "::sizing-policy=1" +
               " sink_" + std::to_string(2 + i) + "::yalign=0.0";
-          // Right half
           comp_desc +=
               " sink_" + std::to_string(2 + n_extra_streams + i) +
               "::xpos=" + std::to_string(right_x) +
@@ -1090,16 +704,16 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
               "::width=" + std::to_string(slot_w) +
               " sink_" + std::to_string(2 + n_extra_streams + i) +
               "::height=" + std::to_string(mono_h) +
-              " sink_" + std::to_string(2 + n_extra_streams + i) + "::sizing-policy=1" +
-              " sink_" + std::to_string(2 + n_extra_streams + i) + "::yalign=0.0";
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::sizing-policy=1" +
+              " sink_" + std::to_string(2 + n_extra_streams + i) +
+              "::yalign=0.0";
         }
         output_chain += " " + comp_desc;
-        output_chain +=
-            " ! video/x-raw(memory:GLMemory),width=" +
-            std::to_string(2 * eye_w) + ",height=" + std::to_string(eye_h) +
-            " ! glcolorconvert";
+        output_chain += " ! video/x-raw(memory:GLMemory),width=" +
+                        std::to_string(stereo_w) + ",height=" +
+                        std::to_string(eye_h) + " ! glcolorconvert";
       } else {
-        // No extra streams
         if (include_overlay) {
           output_chain += " ! gldownload ! videoconvert ! cairooverlay "
                           "name=stereo_overlay ! glupload";
@@ -1107,38 +721,38 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
         output_chain += " ! glcolorconvert";
       }
 
-      const bool split_display = has_glimage || has_glimages;
-      if (split_display) {
+      if (has_glimage || has_glimages) {
         output_chain += " ! tee name=__stereo_display_out__";
       }
 
       if (has_glimage) {
         output_chain +=
-            " __stereo_display_out__. ! queue max-size-buffers=1 leaky=downstream"
-            " ! gtkglsink sync=false force-aspect-ratio=false"
-            " name=__stereo_sink__";
+            " __stereo_display_out__. ! queue max-size-buffers=1 "
+            "leaky=downstream ! gtkglsink sync=false "
+            "force-aspect-ratio=false name=__stereo_sink__";
       }
 
       if (has_glimages) {
         output_chain +=
-            " __stereo_display_out__. ! queue max-size-buffers=1 leaky=downstream"
-        " ! gldownload ! videoconvert ! video/x-raw,format=RGBA,width=" +
-        std::to_string(2 * eye_w) + ",height=" + std::to_string(eye_h) +
+            " __stereo_display_out__. ! queue max-size-buffers=1 "
+            "leaky=downstream ! gldownload ! videoconvert "
+            "! video/x-raw,format=RGBA,width=" +
+            std::to_string(stereo_w) + ",height=" + std::to_string(eye_h) +
             " ! tee name=__stereo_eye_split__"
-            " __stereo_eye_split__. ! queue max-size-buffers=1 leaky=downstream"
-            " ! videocrop left=0 right=" + std::to_string(eye_w) +
-            " top=0 bottom=0"
-        " ! video/x-raw,format=RGBA,width=" + std::to_string(eye_w) +
-        ",height=" + std::to_string(eye_h) +
-            " ! glupload ! glcolorconvert ! gtkglsink name=__left_eye_sink__"
-            " sync=false force-aspect-ratio=false"
-            " __stereo_eye_split__. ! queue max-size-buffers=1 leaky=downstream"
-            " ! videocrop left=" + std::to_string(eye_w) +
-            " right=0 top=0 bottom=0"
-        " ! video/x-raw,format=RGBA,width=" + std::to_string(eye_w) +
-        ",height=" + std::to_string(eye_h) +
-            " ! glupload ! glcolorconvert ! gtkglsink name=__right_eye_sink__"
-            " sync=false force-aspect-ratio=false";
+            " __stereo_eye_split__. ! queue max-size-buffers=1 "
+            "leaky=downstream ! videocrop left=0 right=" +
+            std::to_string(eye_w) +
+            " top=0 bottom=0 ! video/x-raw,format=RGBA,width=" +
+            std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+            " ! glupload ! glcolorconvert ! gtkglsink "
+            "name=__left_eye_sink__ sync=false force-aspect-ratio=false"
+            " __stereo_eye_split__. ! queue max-size-buffers=1 "
+            "leaky=downstream ! videocrop left=" +
+            std::to_string(eye_w) +
+            " right=0 top=0 bottom=0 ! video/x-raw,format=RGBA,width=" +
+            std::to_string(eye_w) + ",height=" + std::to_string(eye_h) +
+            " ! glupload ! glcolorconvert ! gtkglsink "
+            "name=__right_eye_sink__ sync=false force-aspect-ratio=false";
       }
     }
 
@@ -1146,66 +760,70 @@ build_pipeline_string(const sv::AppConfig &stereo, const bool include_overlay) {
     for (const auto &sink : stereo_unixfd_sinks) {
       const std::string socket_path =
           resolve_unixfd_socket_path(stereo.name, sink);
-      const std::string unixfd_upload_chain = get_unixfd_upload_chain();
       if (stereo_branches > 1) {
-        output_chain += " __stereo_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+        output_chain +=
+            " __stereo_out__. ! queue max-size-buffers=2 max-size-time=0 "
+            "max-size-bytes=0 leaky=downstream ! ";
       } else {
-        output_chain += " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+        output_chain +=
+            " ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+            "leaky=downstream ! ";
       }
-      output_chain += unixfd_upload_chain +
-                      " ! queue name=__stereo_unixfd_ts_q" +
-                      std::to_string(stereo_unixfd_index++) +
-                      "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                      "leaky=downstream ! unixfdsink socket-path=" +
-                      socket_path + " sync=true async=false";
+      output_chain +=
+          get_unixfd_upload_chain() + " ! queue name=__stereo_unixfd_ts_q" +
+          std::to_string(stereo_unixfd_index++) +
+          "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+          "leaky=downstream ! unixfdsink socket-path=" +
+          socket_path + " socket-type=abstract sync=false async=false";
     }
 
     if (!overlay_unixfd_sinks.empty()) {
       if (stereo_branches > 1) {
-        output_chain += " __stereo_out__. ! queue name=__stereo_overlay_input_ts_q__ max-size-buffers=1 leaky=downstream ! ";
+        output_chain +=
+            " __stereo_out__. ! queue name=__stereo_overlay_input_ts_q__ "
+            "max-size-buffers=1 leaky=downstream ! ";
       } else {
-        output_chain += " ! queue name=__stereo_overlay_input_ts_q__ max-size-buffers=1 leaky=downstream ! ";
+        output_chain +=
+            " ! queue name=__stereo_overlay_input_ts_q__ "
+            "max-size-buffers=1 leaky=downstream ! ";
       }
-      output_chain += "gldownload ! videoconvert ! cairooverlay name=stereo_overlay_unixfd ";
-      
+      output_chain +=
+          "gldownload ! videoconvert ! cairooverlay "
+          "name=stereo_overlay_unixfd ";
+
       if (overlay_unixfd_sinks.size() > 1) {
         output_chain += "! tee name=__overlay_out__ ";
       }
-      
+
       int overlay_unixfd_index = 0;
       for (const auto &sink : overlay_unixfd_sinks) {
         const std::string socket_path =
             resolve_unixfd_socket_path(stereo.name, sink);
         if (overlay_unixfd_sinks.size() > 1) {
-          output_chain += " __overlay_out__. ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
+          output_chain +=
+              " __overlay_out__. ! queue max-size-buffers=2 "
+              "max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
         } else {
           output_chain += " ! ";
         }
-        output_chain += "videoconvert ! video/x-raw,format=I420"
-                        " ! queue name=__overlay_unixfd_ts_q" +
-                        std::to_string(overlay_unixfd_index++) +
-                        "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                        "leaky=downstream ! unixfdsink socket-path=" +
-                        socket_path + " sync=true async=false";
+        output_chain +=
+            "videoconvert ! video/x-raw,format=I420"
+            " ! queue name=__overlay_unixfd_ts_q" +
+            std::to_string(overlay_unixfd_index++) +
+            "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+            "leaky=downstream ! unixfdsink socket-path=" +
+            socket_path + " socket-type=abstract sync=false async=false";
       }
     }
   } else {
-    if (has_extra) {
-      // No display sink but we still compose (rare: fakesink)
-      if (include_overlay) {
-        output_chain +=
-            " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
-      }
-    } else {
-      if (include_overlay) {
-        output_chain +=
-            " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
-      }
+    if (include_overlay) {
+      output_chain +=
+          " ! gldownload ! videoconvert ! cairooverlay name=stereo_overlay";
     }
     output_chain += " ! fakesink sync=false";
   }
 
-  return extra_chains + left_chain + " " + right_chain + " " + output_chain;
+  return extra_chains + input_chain + " " + output_chain;
 }
 
 class ControlWindow : public Gtk::Window {
@@ -1516,37 +1134,50 @@ int main(int argc, char *argv[]) {
     overlay_state->display_horizontal_offset_px = static_cast<int>(
         std::round(cfg.display_horizontal_offset_px * offset_scale));
   }
-  const sv::AppConfig &app_cfg = cfg;
-
-  if (app_cfg.left.source.empty() || app_cfg.right.source.empty()) {
-    RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must define left and right",
-                 cfg.name.c_str());
-    rclcpp::shutdown();
-    return 1;
-  }
-
-  warn_missing_unixfd_source_sockets(app_cfg, node->get_logger());
-  warn_if_interlaced_stream(app_cfg.left.source, node->get_logger(), "left");
-  warn_if_interlaced_stream(app_cfg.right.source, node->get_logger(), "right");
-
-  if (app_cfg.crop_width <= 0 || app_cfg.crop_height <= 0 ||
-      app_cfg.original_width <= 0 || app_cfg.original_height <= 0) {
+  if (cfg.original_width <= 0 || cfg.original_height <= 0) {
     RCLCPP_ERROR(node->get_logger(),
                  "Config '%s' must provide positive "
-                 "original_width/original_height and crop_width/crop_height",
+                 "per-eye width and height via camera.size, "
+                 "stereo.eye_size, or stereo.size",
                  cfg.name.c_str());
     rclcpp::shutdown();
     return 1;
   }
 
-  if (app_cfg.crop_width % 2 != 0 || app_cfg.crop_height % 2 != 0) {
-    RCLCPP_WARN(
-        node->get_logger(),
-        "Config '%s' has odd crop dimensions (%dx%d). "
-        "Cropping will be rounded to even values to prevent display artifacts.",
-        cfg.name.c_str(), app_cfg.crop_width, app_cfg.crop_height);
+  // Populate cfg.stereo.source from unixfdsources "stereo" entry when
+  // stereo.stream was not set explicitly in the config.
+  if (cfg.stereo.source.empty()) {
+    for (const auto &src : cfg.unixfd_sources) {
+      if (src.name != "stereo") continue;
+      const char *username = getenv("USER");
+      if (!username) {
+        struct passwd *pw = getpwuid(getuid());
+        username = pw ? pw->pw_name : "unknown";
+      }
+      const std::string socket_path = src.socket_path.empty()
+          ? "/tmp/" + cfg.name + "_" + src.name + "_" + std::string(username) + ".sock"
+          : src.socket_path;
+      cfg.stereo.source = "unixfdsrc socket-path=" + socket_path +
+          " socket-type=abstract do-timestamp=true ! video/x-raw,format=I420,width=" +
+          std::to_string(2 * cfg.original_width) +
+          ",height=" + std::to_string(cfg.original_height);
+      RCLCPP_INFO(node->get_logger(),
+                  "Stereo source: %s", socket_path.c_str());
+      break;
+    }
+    if (cfg.stereo.source.empty()) {
+      RCLCPP_ERROR(node->get_logger(),
+                   "Config '%s' must define either stereo.stream or a "
+                   "unixfdsources entry with name \"stereo\"",
+                   cfg.name.c_str());
+      rclcpp::shutdown();
+      return 1;
+    }
   }
+
+  const sv::AppConfig &app_cfg = cfg;
+
+  warn_missing_unixfd_source_sockets(app_cfg, node->get_logger());
 
   const std::string unixfd_upload_chain = get_unixfd_upload_chain();
   if (!app_cfg.unixfd_sinks.empty()) {
@@ -1813,6 +1444,7 @@ int main(int argc, char *argv[]) {
 
   RCLCPP_INFO(node->get_logger(), "GStreamer pipeline string:\n%s", pipeline_string.c_str());
 
+  dc_stereo::PipelineUserData pipeline_user_data;
   GError *error = nullptr;
   GstElement *pipeline = gst_parse_launch(pipeline_string.c_str(), &error);
   if (error != nullptr || pipeline == nullptr) {
@@ -1830,8 +1462,11 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  pipeline_user_data.node = node.get();
+  pipeline_user_data.reconnector.start(pipeline, node.get(), "stereo_display");
+
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-  gst_bus_add_watch(bus, on_bus_message, node.get());
+  gst_bus_add_watch(bus, dc_stereo::on_bus_message, &pipeline_user_data);
   gst_object_unref(bus);
 
   FrameTimestampState timestamp_state;
@@ -1892,6 +1527,7 @@ int main(int argc, char *argv[]) {
     RCLCPP_INFO(node->get_logger(),
                 "Rebuilding pipeline with extra_streams.scale=%.2f", new_scale);
 
+    pipeline_user_data.reconnector.stop();
     // Stop and destroy old pipeline
     gst_element_set_state(pipeline, GST_STATE_NULL);
     gst_object_unref(pipeline);
@@ -1916,8 +1552,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Re-attach bus watcher
+    pipeline_user_data.reconnector.start(pipeline, node.get(), "stereo_display");
     GstBus *new_bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
-    gst_bus_add_watch(new_bus, on_bus_message, node.get());
+    gst_bus_add_watch(new_bus, dc_stereo::on_bus_message, &pipeline_user_data);
     gst_object_unref(new_bus);
 
     // Re-attach overlay signals
@@ -1964,6 +1601,8 @@ int main(int argc, char *argv[]) {
 
   RCLCPP_INFO(node->get_logger(), "Stereo display pipeline on quit: %s",
               pipeline_string.c_str());
+
+  pipeline_user_data.reconnector.stop();
 
   if (pipeline) {
     gst_element_send_event(pipeline, gst_event_new_eos());

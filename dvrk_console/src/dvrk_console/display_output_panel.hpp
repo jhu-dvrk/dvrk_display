@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <dvrk_data/config.hpp>
+#include <dvrk_data/window_monitor_manager.hpp>
 
 namespace sv {
 
@@ -112,6 +113,7 @@ private:
     sigc::connection monitor_combo_connection;
     Gtk::CheckButton *fullscreen_btn = nullptr;
     std::unique_ptr<Gtk::Window> window;
+    std::unique_ptr<WindowMonitorManager> monitor_manager;
   };
 
   static int clip_int(const int value, const int min_value,
@@ -152,52 +154,17 @@ private:
   }
 
   void load_persisted_settings() {
-    m_persisted_sink_settings.clear();
-    const std::string path = settings_file_path();
-    if (!std::filesystem::exists(path)) {
-      return;
-    }
-
-    try {
-      Glib::KeyFile key_file;
-      key_file.load_from_file(path);
-      for (const auto &group : key_file.get_groups()) {
-        if (group.rfind("sink:", 0) != 0) {
-          continue;
-        }
-        const std::string sink_name = group.substr(5);
-        const int monitor = key_file.get_integer(group, "monitor");
-        const bool fullscreen = key_file.get_boolean(group, "fullscreen");
-        m_persisted_sink_settings[sink_name] = {monitor, fullscreen};
-      }
-    } catch (const Glib::Error &error) {
-      std::cerr << "Warning: unable to load display settings from '" << path
-                << "': " << error.what() << std::endl;
-    }
+    // Handled individually by WindowMonitorManager per sink
   }
 
   void save_persisted_settings() {
-    m_persisted_sink_settings = capture_live_settings();
-
-    try {
-      const std::string path = settings_file_path();
-      std::filesystem::create_directories(
-          std::filesystem::path(path).parent_path());
-
-      Glib::KeyFile key_file;
-      key_file.set_string("viewer", "name", m_cfg.name);
-      for (const auto &[sink_name, settings] : m_persisted_sink_settings) {
-        const std::string group = "sink:" + sink_name;
-        key_file.set_integer(group, "monitor", settings.first);
-        key_file.set_boolean(group, "fullscreen", settings.second);
+    for (auto &control : m_sink_controls) {
+      if (control.monitor_combo && control.monitor_manager) {
+        const int active = control.monitor_combo->get_active_row_number();
+        control.monitor_manager->set_monitor_index(active >= 0 ? active : 0);
+        control.monitor_manager->set_fullscreen(control.fullscreen_btn && control.fullscreen_btn->get_active());
+        control.monitor_manager->save_settings("sink:" + control.sink_name);
       }
-      Glib::file_set_contents(path, key_file.to_data());
-    } catch (const Glib::Error &error) {
-      std::cerr << "Warning: unable to save display settings: "
-                << error.what() << std::endl;
-    } catch (const std::exception &error) {
-      std::cerr << "Warning: unable to save display settings: "
-                << error.what() << std::endl;
     }
   }
 
@@ -262,13 +229,12 @@ private:
       }
     }
 
-    int initial_monitor = 0;
-    bool initial_fullscreen = false;
-    const auto found = previous_settings.find(control.sink_name);
-    if (found != previous_settings.end()) {
-      initial_monitor = found->second.first;
-      initial_fullscreen = found->second.second;
-    }
+    control.monitor_manager = std::make_unique<WindowMonitorManager>(
+        *control.window, m_cfg.name, m_settings_suffix);
+    control.monitor_manager->load_settings("sink:" + control.sink_name);
+
+    int initial_monitor = control.monitor_manager->get_monitor_index();
+    bool initial_fullscreen = control.monitor_manager->get_fullscreen();
 
     if (!m_monitor_labels.empty()) {
       initial_monitor = clip_int(initial_monitor, 0,
@@ -313,100 +279,33 @@ private:
   }
 
   void apply_display_selection(SinkDisplayControl &control) {
-    auto display = Gdk::Display::get_default();
-    if (!display) {
+    if (!control.monitor_combo || !control.monitor_manager) {
       return;
     }
-
-    const int monitor_count = display->get_n_monitors();
-    if (monitor_count <= 0) {
-      return;
-    }
-
-    int requested_monitor = 0;
-    if (control.monitor_combo) {
-      const int active = control.monitor_combo->get_active_row_number();
-      if (active >= 0) {
-        requested_monitor = active;
-      }
-    }
-    const int target_monitor = clip_int(requested_monitor, 0, monitor_count - 1);
-    auto monitor = display->get_monitor(target_monitor);
-    if (!monitor || !control.window) {
-      return;
-    }
-
-    auto screen = control.window->get_screen();
-    if (!screen) {
-      return;
-    }
-
-    Gdk::Rectangle geometry;
-    monitor->get_geometry(geometry);
-
-    const bool fullscreen =
-        control.fullscreen_btn && control.fullscreen_btn->get_active();
+    const int active = control.monitor_combo->get_active_row_number();
+    control.monitor_manager->set_monitor_index(active >= 0 ? active : 0);
+    control.monitor_manager->set_fullscreen(control.fullscreen_btn && control.fullscreen_btn->get_active());
+    
     const int offset = 40 * sink_display_order(control.sink_name);
-    if (fullscreen) {
-      control.window->unfullscreen();
-      control.window->move(geometry.get_x() + offset,
-                           geometry.get_y() + offset);
-      control.window->present();
-
-      Gtk::Window *window = control.window.get();
-      const auto screen_copy = screen;
-      Glib::signal_idle().connect_once([window, screen_copy, target_monitor]() {
-        if (window) {
-          window->fullscreen_on_monitor(screen_copy, target_monitor);
-          window->present();
-        }
-      });
-    } else {
-      control.window->unfullscreen();
-      control.window->move(geometry.get_x() + offset,
-                           geometry.get_y() + offset);
-      control.window->present();
-    }
+    control.monitor_manager->apply_display_settings(offset);
   }
 
   // Polls window positions every second and syncs the monitor combo when a
   // window is dragged to a different display. Returns true to keep running.
   bool poll_window_monitors() {
     for (auto &control : m_sink_controls) {
-      if (!control.monitor_combo || !control.window) {
+      if (!control.monitor_combo || !control.window || !control.monitor_manager) {
         continue;
       }
-      const int idx = monitor_index_for_window(*control.window);
+      control.monitor_manager->poll_window_monitor("sink:" + control.sink_name);
+      const int idx = control.monitor_manager->get_monitor_index();
       if (idx >= 0 && idx != control.monitor_combo->get_active_row_number()) {
         control.monitor_combo_connection.block();
         control.monitor_combo->set_active(idx);
         control.monitor_combo_connection.unblock();
-        save_persisted_settings();
       }
     }
     return true;
-  }
-
-  int monitor_index_for_window(Gtk::Window &win) const {
-    auto display = Gdk::Display::get_default();
-    if (!display) {
-      return -1;
-    }
-    auto gdk_window = win.get_window();
-    if (!gdk_window) {
-      return -1;
-    }
-    auto monitor = display->get_monitor_at_window(gdk_window);
-    if (!monitor) {
-      return -1;
-    }
-    const int n = display->get_n_monitors();
-    for (int i = 0; i < n; ++i) {
-      if (display->get_monitor(i) == monitor) {
-        return i;
-      }
-    }
-    return -1;
   }
 
   int sink_display_order(const std::string &sink_name) const {

@@ -12,12 +12,22 @@ import time
 from pathlib import Path
 
 
-def find_sibling_executable(name):
+def find_executable(package, name):
     here = Path(sys.argv[0]).resolve().parent
     candidate = here / name
     if candidate.exists():
         return [str(candidate)]
-    return ["ros2", "run", "dvrk_data", name]
+
+    for parent in Path(sys.argv[0]).resolve().parents:
+        candidate = parent / package / "lib" / package / name
+        if candidate.exists():
+            return [str(candidate)]
+
+    return ["ros2", "run", package, name]
+
+
+def find_sibling_executable(name):
+    return find_executable("dvrk_data", name)
 
 
 def run_process(label, cmd, log_dir):
@@ -91,6 +101,74 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def build_source_config(path, sockets):
+    write_json(
+        path,
+        {
+            "type": "dvrk_data:stereo_source@1.0.0",
+            "name": "dvrk_smoke",
+            "unixfdsinks": [
+                {
+                    "stream": "left",
+                    "socket_path": sockets["left"],
+                },
+                {
+                    "stream": "right",
+                    "socket_path": sockets["right"],
+                },
+            ],
+            "camera": {
+                "size": {"width": 640, "height": 480},
+                "left": {
+                    "stream": (
+                        "videotestsrc pattern=smpte is-live=true "
+                        "! video/x-raw,width=640,height=480,framerate=30/1"
+                    )
+                },
+                "right": {
+                    "stream": (
+                        "videotestsrc pattern=ball is-live=true "
+                        "! video/x-raw,width=640,height=480,framerate=30/1"
+                    )
+                },
+            },
+        },
+    )
+
+
+def build_alignment_config(path, sockets):
+    write_json(
+        path,
+        {
+            "type": "dvrk_data:stereo_alignment@1.0.0",
+            "name": "dvrk_smoke",
+            "unixfdsinks": [
+                {
+                    "stream": "stereo",
+                    "socket_path": sockets["stereo"],
+                }
+            ],
+            "camera": {
+                "size": {"width": 640, "height": 480},
+                "left": {
+                    "stream": (
+                        f"unixfdsrc socket-path={sockets['left']} do-timestamp=true "
+                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+                    )
+                },
+                "right": {
+                    "stream": (
+                        f"unixfdsrc socket-path={sockets['right']} do-timestamp=true "
+                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
+                    )
+                },
+                "crop": {"width": 640, "height": 480},
+                "alignment": {"horizontal_shift_px": 0, "vertical_shift_px": 0},
+            },
+        },
+    )
+
+
 def build_stereo_config(path, sockets, display_enabled):
     sinks = ["glimage"] if display_enabled else []
     write_json(
@@ -100,31 +178,12 @@ def build_stereo_config(path, sockets, display_enabled):
             "name": "dvrk_smoke",
             "dvrk_console_namespace": "console",
             "sinks": sinks,
-            "unixfdsinks": [
-                {
-                    "stream": "stereo",
-                    "name": "smoke_stereo",
-                    "socket_path": sockets["stereo"],
-                }
-            ],
-            "camera": {
-                "size": {"width": 640, "height": 480},
-                "left": {
-                    "stream": (
-                        f"unixfdsrc socket-path={sockets['left']} do-timestamp=true "
-                        "! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream "
-                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
-                    )
-                },
-                "right": {
-                    "stream": (
-                        f"unixfdsrc socket-path={sockets['right']} do-timestamp=true "
-                        "! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream "
-                        "! video/x-raw,format=I420,width=640,height=480,framerate=30/1"
-                    )
-                },
-                "crop": {"width": 640, "height": 480},
-                "alignment": {"horizontal_shift_px": 0, "vertical_shift_px": 0},
+            "stereo": {
+                "stream": (
+                    f"unixfdsrc socket-path={sockets['stereo']} do-timestamp=true "
+                    "! video/x-raw,format=I420,width=1280,height=480,framerate=30/1"
+                ),
+                "eye_size": {"width": 640, "height": 480},
             },
         },
     )
@@ -209,34 +268,28 @@ def main():
         except FileNotFoundError:
             pass
 
+    source_config = root / "stereo_source.json"
+    alignment_config = root / "stereo_alignment.json"
     stereo_config = root / "stereo_display.json"
     record_config = root / "record.json"
+    build_source_config(source_config, sockets)
+    build_alignment_config(alignment_config, sockets)
     build_stereo_config(stereo_config, sockets, not args.no_display)
     build_record_config(record_config, record_dir, sockets)
 
     processes = []
     try:
-        source_cmd = find_sibling_executable("synthetic_source.py") + [
-            "--left-socket",
-            sockets["left"],
-            "--right-socket",
-            sockets["right"],
-            "--correlation-topic",
-            "/dvrk_test/correlation",
-            "--width",
-            "640",
-            "--height",
-            "480",
-            "--fps",
-            "30",
-        ]
-        processes.append(run_process("synthetic_source", source_cmd, log_dir))
+        source_cmd = find_sibling_executable("stereo_source") + ["-c", str(source_config)]
+        processes.append(run_process("stereo_source", source_cmd, log_dir))
         wait_for_path(sockets["left"], args.startup_timeout, "left source socket", processes[-1])
         wait_for_path(sockets["right"], args.startup_timeout, "right source socket", processes[-1])
 
-        stereo_cmd = ["ros2", "run", "dvrk_console", "stereo_display", "-c", str(stereo_config)]
-        processes.append(run_process("stereo_display", stereo_cmd, log_dir))
+        alignment_cmd = find_sibling_executable("stereo_alignment") + ["-c", str(alignment_config)]
+        processes.append(run_process("stereo_alignment", alignment_cmd, log_dir))
         wait_for_path(sockets["stereo"], args.startup_timeout, "stereo output socket", processes[-1])
+
+        stereo_cmd = find_executable("dvrk_console", "stereo_display") + ["-c", str(stereo_config)]
+        processes.append(run_process("stereo_display", stereo_cmd, log_dir))
 
         if args.with_record:
             record_cmd = ["ros2", "run", "dvrk_data", "record", "-c", str(record_config)]

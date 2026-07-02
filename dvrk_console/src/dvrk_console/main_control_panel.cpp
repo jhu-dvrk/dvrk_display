@@ -30,7 +30,10 @@
 #include <sstream>
 #include <unistd.h>
 
+#include <fstream>
 #include <dvrk_data/config.hpp>
+#include <dvrk_data/stereo_common.hpp>
+#include <dvrk_data/window_monitor_manager.hpp>
 
 // Configuration and State structures
 struct ArmStatus {
@@ -103,6 +106,99 @@ VideoSource make_video_source(const std::string& viewer_name,
                               const std::string& source) {
     return VideoSource{video_source_label(source),
                        resolve_video_source_path(viewer_name, source)};
+}
+
+std::vector<VideoSource> scan_available_video_sources(const std::string& viewer_name) {
+    std::vector<VideoSource> found;
+    std::unordered_set<std::string> seen_paths;
+    const std::string username = get_username();
+    const std::string expected_suffix = "_" + username + ".sock";
+
+    // 1. Search for default/expected paths explicitly for cleanliness
+    const std::vector<std::string> standard_streams = {"left", "right", "stereo", "overlay"};
+    for (const auto& stream : standard_streams) {
+        std::string path = "/tmp/" + viewer_name + "_" + stream + "_" + username + ".sock";
+        if (std::filesystem::exists(path)) {
+            found.push_back(VideoSource{stream, path});
+            seen_paths.insert(path);
+        }
+    }
+
+    // 2. Also search /tmp dynamically for any socket files matching any app name and standard streams
+    try {
+        if (std::filesystem::exists("/tmp")) {
+            for (const auto& entry : std::filesystem::directory_iterator("/tmp")) {
+                std::string filename = entry.path().filename().string();
+                if (filename.length() > expected_suffix.length() &&
+                    filename.compare(filename.length() - expected_suffix.length(), expected_suffix.length(), expected_suffix) == 0) {
+                    
+                    std::string socket_path = entry.path().string();
+                    if (seen_paths.find(socket_path) == seen_paths.end()) {
+                        std::string base = filename.substr(0, filename.length() - expected_suffix.length());
+                        size_t last_und = base.find_last_of('_');
+                        std::string stream = base;
+                        std::string app = viewer_name;
+                        if (last_und != std::string::npos) {
+                            app = base.substr(0, last_und);
+                            stream = base.substr(last_und + 1);
+                        }
+                        
+                        std::string label = stream + " (" + app + ")";
+                        found.push_back(VideoSource{label, socket_path});
+                        seen_paths.insert(socket_path);
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning scanning /tmp for video sources: " << e.what() << std::endl;
+    }
+
+    // 3. Scan /proc/net/unix for active abstract sockets matching the naming scheme
+    try {
+        std::ifstream proc_file("/proc/net/unix");
+        if (proc_file.is_open()) {
+            std::string line;
+            while (std::getline(proc_file, line)) {
+                size_t at_pos = line.rfind('@');
+                if (at_pos != std::string::npos && at_pos > 0 && (line[at_pos-1] == ' ' || line[at_pos-1] == '\t')) {
+                    std::string socket_path = line.substr(at_pos + 1);
+                    while (!socket_path.empty() && std::isspace(socket_path.back())) {
+                        socket_path.pop_back();
+                    }
+                    if (socket_path.length() > expected_suffix.length() &&
+                        socket_path.compare(socket_path.length() - expected_suffix.length(), expected_suffix.length(), expected_suffix) == 0) {
+                        
+                        if (seen_paths.find(socket_path) == seen_paths.end()) {
+                            size_t slash_pos = socket_path.find_last_of('/');
+                            std::string filename = (slash_pos == std::string::npos) ? socket_path : socket_path.substr(slash_pos + 1);
+                            
+                            std::string base = filename.substr(0, filename.length() - expected_suffix.length());
+                            size_t last_und = base.find_last_of('_');
+                            std::string stream = base;
+                            std::string app = viewer_name;
+                            if (last_und != std::string::npos) {
+                                app = base.substr(0, last_und);
+                                stream = base.substr(last_und + 1);
+                            }
+                            
+                            std::string label = stream + " (" + app + ")";
+                            found.push_back(VideoSource{label, socket_path});
+                            seen_paths.insert(socket_path);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning scanning /proc/net/unix for abstract video sources: " << e.what() << std::endl;
+    }
+
+    std::sort(found.begin(), found.end(), [](const VideoSource& a, const VideoSource& b) {
+        return a.label < b.label;
+    });
+
+    return found;
 }
 
 void print_usage(const char *executable) {
@@ -225,6 +321,7 @@ public:
                       const std::vector<VideoSource>& video_sources)
         : m_node(node), m_settings_name(settings_name), m_console_name(console_name),
           m_video_sources(video_sources),
+          m_explicit_video_sources(video_sources),
           m_main_paned(Gtk::ORIENTATION_HORIZONTAL),
           m_left_pane(Gtk::ORIENTATION_VERTICAL, 10),
           m_right_pane(Gtk::ORIENTATION_VERTICAL, 5),
@@ -244,16 +341,16 @@ public:
         // Build left control panel structure
         setup_left_pane();
 
-        // Setup Main Resizable Layout
-        if (!m_video_sources.empty()) {
-            m_right_pane.set_hexpand(true);
-            m_right_pane.set_vexpand(true);
-            m_main_paned.pack1(m_left_pane, false, false); // Keep left controls fixed size on window resize
-            m_main_paned.pack2(m_right_pane, true, false);  // Let right video expand to fill extra space
-            m_main_paned.set_position(380); // Heuristic initial split: 380px for controls, rest for video
-            add(m_main_paned);
-        } else {
-            add(m_left_pane);
+        // Setup Main Resizable Layout - always use paned so we can show right pane dynamically
+        m_right_pane.set_hexpand(true);
+        m_right_pane.set_vexpand(true);
+        m_main_paned.pack1(m_left_pane, false, false); // Keep left controls fixed size on window resize
+        m_main_paned.pack2(m_right_pane, true, false);  // Let right video expand to fill extra space
+        m_main_paned.set_position(380); // Heuristic initial split: 380px for controls, rest for video
+        add(m_main_paned);
+
+        if (m_video_sources.empty()) {
+            m_right_pane.hide();
         }
 
         // Initialize ROS2 Publishers and Subscribers
@@ -268,6 +365,7 @@ public:
         // Build right video panel structure and start pipelines AFTER the layout is attached and shown
         setup_right_pane();
 
+        m_monitor_manager = std::make_unique<sv::WindowMonitorManager>(*this, m_settings_name, "control_panel");
         load_persisted_display_settings();
         if (m_have_persisted_display_settings) {
             Glib::signal_idle().connect_once([this]() {
@@ -623,18 +721,20 @@ private:
     }
 
     void setup_right_pane() {
-        if (m_video_sources.empty()) {
-            return;
-        }
-
         m_video_area.set_hexpand(true);
         m_video_area.set_vexpand(true);
         m_right_pane.pack_start(m_video_area, Gtk::PACK_EXPAND_WIDGET, 0);
-        open_video_source(m_video_sources[0].socket_path);
-        m_right_pane.show_all();
+        if (!m_video_sources.empty()) {
+            open_video_source(m_video_sources[0].socket_path);
+            m_right_pane.show_all();
+        } else {
+            m_right_pane.hide();
+        }
     }
 
     void close_video_source() {
+        m_video_user_data.reconnector.stop();
+
         if (m_current_video_widget) {
             m_video_area.remove(*m_current_video_widget);
             m_current_video_widget = nullptr;
@@ -656,7 +756,7 @@ private:
 
         close_video_source();
 
-        std::string pipe_str = "unixfdsrc socket-path=" + path + " do-timestamp=true "
+        std::string pipe_str = "unixfdsrc socket-path=" + path + " socket-type=abstract do-timestamp=true "
             "! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream "
             "! videoconvert ! gtksink name=sink";
 
@@ -693,11 +793,19 @@ private:
         mm_widget->show();
         g_object_unref(gtk_widget); // decrement reference returned by g_object_get
 
+        m_video_user_data.node = m_node.get();
+        m_video_user_data.reconnector.start(pipeline, m_node.get(), "control_panel_video");
+
+        GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
+        gst_bus_add_watch(bus, dc_stereo::on_bus_message, &m_video_user_data);
+        gst_object_unref(bus);
+
         gst_element_set_state(pipeline, GST_STATE_PLAYING);
         m_current_video_widget = mm_widget;
         m_current_video_pipeline = pipeline;
         m_current_video_path = path;
         m_right_pane.show_all();
+        m_right_pane.show();
         return true;
     }
 
@@ -1141,6 +1249,23 @@ private:
         }
     }
 
+    void refresh_video_sources() {
+        std::vector<VideoSource> new_sources = m_explicit_video_sources;
+        std::unordered_set<std::string> seen_paths;
+        for (const auto& src : new_sources) {
+            seen_paths.insert(src.socket_path);
+        }
+
+        std::vector<VideoSource> discovered = scan_available_video_sources(m_settings_name);
+        for (const auto& ds : discovered) {
+            if (seen_paths.find(ds.socket_path) == seen_paths.end()) {
+                new_sources.push_back(ds);
+                seen_paths.insert(ds.socket_path);
+            }
+        }
+        m_video_sources = new_sources;
+    }
+
     void on_wrench_clicked() {
         // Clear menu first to rebuild dynamically
         auto children = m_wrench_menu.get_children();
@@ -1148,8 +1273,11 @@ private:
             m_wrench_menu.remove(*child);
         }
 
+        // Re-scan and merge available video sources dynamically
+        refresh_video_sources();
+
         // 1. Add "Use video" submenu
-        if (m_video_sources.size() > 1) {
+        if (!m_video_sources.empty()) {
             auto* use_video_item = create_menu_item("Use video");
             auto* video_sources_menu = Gtk::manage(new Gtk::Menu());
             append_video_source_items(*video_sources_menu);
@@ -1164,20 +1292,16 @@ private:
         send_to_item->set_submenu(*monitors_menu);
         apply_menu_item_text_color(*send_to_item);
 
-        auto display = Gdk::Display::get_default();
-        if (display) {
-            int n_monitors = display->get_n_monitors();
-            for (int i = 0; i < n_monitors; ++i) {
-                auto monitor = display->get_monitor(i);
-                std::string model = monitor->get_model();
-                std::string label = model.empty() ? "Monitor " + std::to_string(i + 1) : model;
-                
-                auto* monitor_item = create_menu_item(label);
-                monitor_item->signal_activate().connect([this, i]() {
-                    send_to_monitor(i);
-                });
-                monitors_menu->append(*monitor_item);
-            }
+        if (m_monitor_manager) {
+            m_monitor_manager->populate_send_to_menu(
+                *monitors_menu, 0, "window",
+                [this](const std::string& label) {
+                    return create_menu_item(label);
+                },
+                [this]() {
+                    m_window_monitor_index = m_monitor_manager->get_monitor_index();
+                }
+            );
         }
         m_wrench_menu.append(*send_to_item);
 
@@ -1208,11 +1332,9 @@ private:
     }
 
     void send_to_monitor(int monitor_idx) {
-        auto display = Gdk::Display::get_default();
-        if (display && monitor_idx >= 0 && monitor_idx < display->get_n_monitors()) {
-            m_window_monitor_index = monitor_idx;
-            apply_window_display_settings();
-            save_persisted_display_settings();
+        if (m_monitor_manager) {
+            m_monitor_manager->send_to_monitor(monitor_idx, 0, "window");
+            m_window_monitor_index = m_monitor_manager->get_monitor_index();
         }
     }
 
@@ -1223,126 +1345,49 @@ private:
     }
 
     std::string settings_file_path() const {
-        std::string safe_name = m_settings_name.empty() ? "dvrk_display" : m_settings_name;
-        for (char& ch : safe_name) {
-            const unsigned char uch = static_cast<unsigned char>(ch);
-            if (!std::isalnum(uch) && ch != '-' && ch != '_') {
-                ch = '_';
-            }
+        if (m_monitor_manager) {
+            return m_monitor_manager->settings_file_path();
         }
-
-        return Glib::build_filename(
-            Glib::build_filename(Glib::get_user_config_dir(), "dvrk_display"),
-            safe_name + "_control_panel_gui.ini");
+        return "";
     }
 
     void load_persisted_display_settings() {
         m_have_persisted_display_settings = false;
-        const std::string path = settings_file_path();
-        if (!std::filesystem::exists(path)) {
-            return;
-        }
-
-        try {
-            Glib::KeyFile key_file;
-            key_file.load_from_file(path);
-            m_window_monitor_index = key_file.get_integer("window", "monitor");
-            m_window_fullscreen = key_file.get_boolean("window", "fullscreen");
+        if (m_monitor_manager) {
+            m_monitor_manager->load_settings("window");
+            m_window_monitor_index = m_monitor_manager->get_monitor_index();
+            m_window_fullscreen = m_monitor_manager->get_fullscreen();
             m_have_persisted_display_settings = true;
-        } catch (const Glib::Error& error) {
-            std::cerr << "Warning: unable to load display settings from '" << path
-                      << "': " << error.what() << std::endl;
         }
     }
 
     void save_persisted_display_settings() {
-        try {
-            const std::string path = settings_file_path();
-            std::filesystem::create_directories(
-                std::filesystem::path(path).parent_path());
-
-            Glib::KeyFile key_file;
-            key_file.set_string("viewer", "name", m_settings_name);
-            key_file.set_integer("window", "monitor", m_window_monitor_index);
-            key_file.set_boolean("window", "fullscreen", m_window_fullscreen);
-            Glib::file_set_contents(path, key_file.to_data());
-        } catch (const Glib::Error& error) {
-            std::cerr << "Warning: unable to save display settings: "
-                      << error.what() << std::endl;
-        } catch (const std::exception& error) {
-            std::cerr << "Warning: unable to save display settings: "
-                      << error.what() << std::endl;
+        if (m_monitor_manager) {
+            m_monitor_manager->set_monitor_index(m_window_monitor_index);
+            m_monitor_manager->set_fullscreen(m_window_fullscreen);
+            m_monitor_manager->save_settings("window");
         }
     }
 
     void apply_window_display_settings() {
-        auto display = Gdk::Display::get_default();
-        if (!display || display->get_n_monitors() <= 0) {
-            return;
-        }
-
-        const int target_monitor = std::max(
-            0, std::min(m_window_monitor_index, display->get_n_monitors() - 1));
-        m_window_monitor_index = target_monitor;
-
-        auto monitor = display->get_monitor(target_monitor);
-        if (!monitor) {
-            return;
-        }
-
-        Gdk::Rectangle rect;
-        monitor->get_geometry(rect);
-        const int monitor_x = rect.get_x();
-        const int monitor_y = rect.get_y();
-        const int monitor_width = rect.get_width();
-        const int monitor_height = rect.get_height();
-
-        unmaximize();
-        unfullscreen();
-        move(monitor_x, monitor_y);
-        present();
-
-        if (m_window_fullscreen) {
-            Gtk::Window* window = this;
-            Glib::signal_idle().connect_once([window, monitor_x, monitor_y,
-                                               monitor_width, monitor_height]() {
-                if (window) {
-                    window->move(monitor_x, monitor_y);
-                    window->resize(monitor_width, monitor_height);
-                    window->fullscreen();
-                    window->present();
-                }
-            });
+        if (m_monitor_manager) {
+            m_monitor_manager->set_monitor_index(m_window_monitor_index);
+            m_monitor_manager->set_fullscreen(m_window_fullscreen);
+            m_monitor_manager->apply_display_settings(0);
         }
     }
 
     bool poll_window_monitor() {
-        const int monitor_idx = monitor_index_for_window();
-        if (monitor_idx >= 0 && monitor_idx != m_window_monitor_index) {
-            m_window_monitor_index = monitor_idx;
-            save_persisted_display_settings();
+        if (m_monitor_manager) {
+            m_monitor_manager->poll_window_monitor("window");
+            m_window_monitor_index = m_monitor_manager->get_monitor_index();
         }
         return true;
     }
 
     int monitor_index_for_window() {
-        auto display = Gdk::Display::get_default();
-        if (!display) {
-            return -1;
-        }
-        auto gdk_window = get_window();
-        if (!gdk_window) {
-            return -1;
-        }
-        auto monitor = display->get_monitor_at_window(gdk_window);
-        if (!monitor) {
-            return -1;
-        }
-        const int n = display->get_n_monitors();
-        for (int i = 0; i < n; ++i) {
-            if (display->get_monitor(i) == monitor) {
-                return i;
-            }
+        if (m_monitor_manager) {
+            return m_monitor_manager->get_current_monitor_index();
         }
         return -1;
     }
@@ -1505,6 +1550,7 @@ private:
     std::string m_settings_name;
     std::string m_console_name;
     std::vector<VideoSource> m_video_sources;
+    std::vector<VideoSource> m_explicit_video_sources;
 
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr m_teleop_selected_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr m_teleop_unselected_sub;
@@ -1576,6 +1622,7 @@ private:
     GstElement* m_current_video_pipeline = nullptr;
     Gtk::Widget* m_current_video_widget = nullptr;
     std::string m_current_video_path;
+    dc_stereo::PipelineUserData m_video_user_data;
 
     // Asynchronous resets
     std::unordered_map<std::string, ResetState> m_active_resets;
@@ -1605,6 +1652,7 @@ private:
     int m_window_monitor_index = 0;
     bool m_window_fullscreen = false;
     bool m_have_persisted_display_settings = false;
+    std::unique_ptr<sv::WindowMonitorManager> m_monitor_manager;
 
     // Colors
     Gdk::RGBA m_color_green;
@@ -1641,9 +1689,21 @@ int main(int argc, char* argv[]) {
     }
 
     std::vector<VideoSource> video_sources;
-    video_sources.reserve(config.video_sources.size());
+    std::unordered_set<std::string> seen_paths;
     for (const auto& source : config.video_sources) {
-        video_sources.push_back(make_video_source(config.name, source));
+        VideoSource vs = make_video_source(config.name, source);
+        if (seen_paths.find(vs.socket_path) == seen_paths.end()) {
+            video_sources.push_back(vs);
+            seen_paths.insert(vs.socket_path);
+        }
+    }
+
+    std::vector<VideoSource> discovered = scan_available_video_sources(config.name);
+    for (const auto& ds : discovered) {
+        if (seen_paths.find(ds.socket_path) == seen_paths.end()) {
+            video_sources.push_back(ds);
+            seen_paths.insert(ds.socket_path);
+        }
     }
 
     // Initialize GStreamer

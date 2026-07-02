@@ -111,6 +111,46 @@ target_link_libraries(video_latency
   dvrk_data
 )
 
+add_executable(stereo_source
+  src/stereo_source/main.cpp
+)
+ament_target_dependencies(stereo_source
+  rclcpp
+)
+target_include_directories(stereo_source PRIVATE
+  ${GST_INCLUDE_DIRS}
+  ${JSONCPP_INCLUDE_DIRS}
+)
+target_compile_options(stereo_source PRIVATE
+  ${GST_CFLAGS_OTHER}
+  ${JSONCPP_CFLAGS_OTHER}
+)
+target_link_libraries(stereo_source
+  ${GST_LIBRARIES}
+  ${JSONCPP_LIBRARIES}
+  dvrk_data
+)
+
+add_executable(stereo_alignment
+  src/stereo_alignment/main.cpp
+)
+ament_target_dependencies(stereo_alignment
+  rclcpp
+)
+target_include_directories(stereo_alignment PRIVATE
+  ${GST_INCLUDE_DIRS}
+  ${JSONCPP_INCLUDE_DIRS}
+)
+target_compile_options(stereo_alignment PRIVATE
+  ${GST_CFLAGS_OTHER}
+  ${JSONCPP_CFLAGS_OTHER}
+)
+target_link_libraries(stereo_alignment
+  ${GST_LIBRARIES}
+  ${JSONCPP_LIBRARIES}
+  dvrk_data
+)
+
 add_executable(video_configurator
   src/video_configurator/video_configurator.cpp
 )
@@ -132,6 +172,8 @@ install(TARGETS dvrk_data
 
 install(TARGETS
   record
+  stereo_source
+  stereo_alignment
   video_tag
   video_latency
   video_configurator
@@ -151,6 +193,7 @@ install(PROGRAMS
   scripts/smoke_test_stack
   scripts/extract
   scripts/encord_to_tags
+  scripts/stereo_alignment_calibration
   DESTINATION lib/${PROJECT_NAME}
 )
 

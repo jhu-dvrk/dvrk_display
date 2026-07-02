@@ -25,6 +25,11 @@ struct UnixfdSinkConfig {
     std::string socket_path;
 };
 
+struct UnixfdSourceConfig {
+    std::string name;         // "left" or "right" — used for matching and socket path suffix
+    std::string socket_path;  // optional, explicit absolute path
+};
+
 struct StereoExtraStream {
     std::string left;
     std::string right;
@@ -55,6 +60,7 @@ struct AppConfig {
 
     SourceConfig left;
     SourceConfig right;
+    SourceConfig stereo;
     ColorAdjustment left_color;
     ColorAdjustment right_color;
     int original_width = 0;
@@ -68,6 +74,7 @@ struct AppConfig {
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;
     std::vector<UnixfdSinkConfig> unixfd_sinks;
+    std::vector<UnixfdSourceConfig> unixfd_sources;
     ExtraStreamsConfig extra_streams;
     ARConfig ar;
 };
